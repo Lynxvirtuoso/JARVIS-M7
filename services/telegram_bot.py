@@ -157,6 +157,7 @@ class TelegramBotService(QThread):
         payload = {
             "chat_id": chat_id,
             "text": text,
+            "parse_mode": "HTML",
             "reply_markup": self.get_default_reply_markup()
         }
         try:
@@ -171,6 +172,7 @@ class TelegramBotService(QThread):
         payload = {
             "chat_id": chat_id,
             "text": text,
+            "parse_mode": "HTML",
             "reply_markup": self.get_default_reply_markup()
         }
         try:
@@ -190,7 +192,8 @@ class TelegramBotService(QThread):
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": text
+            "text": text,
+            "parse_mode": "HTML"
         }
         try:
             requests.post(url, json=payload, timeout=10)
@@ -204,6 +207,7 @@ class TelegramBotService(QThread):
         payload = {
             "chat_id": chat_id,
             "text": text,
+            "parse_mode": "HTML",
             "reply_markup": {
                 "inline_keyboard": [
                     [
@@ -249,6 +253,38 @@ class TelegramBotService(QThread):
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logger.error(f"Failed to send typing indicator: {e}")
+
+    def send_photo(self, chat_id: int, image_path: str, caption: str = ""):
+        if not self.bot_token:
+            return
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
+        try:
+            with open(image_path, "rb") as photo:
+                files = {"photo": photo}
+                data = {
+                    "chat_id": chat_id, 
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                }
+                requests.post(url, data=data, files=files, timeout=20)
+        except Exception as e:
+            logger.error(f"Failed to send photo via Telegram: {e}")
+
+    def send_document(self, chat_id: int, file_path: str, caption: str = ""):
+        if not self.bot_token:
+            return
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        try:
+            with open(file_path, "rb") as doc:
+                files = {"document": doc}
+                data = {
+                    "chat_id": chat_id, 
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                }
+                requests.post(url, data=data, files=files, timeout=20)
+        except Exception as e:
+            logger.error(f"Failed to send document via Telegram: {e}")
 
     def stop(self):
         self.running = False

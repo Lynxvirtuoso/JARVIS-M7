@@ -68,6 +68,7 @@ class JarvisApp(QObject):
         
         # Initialize Engine
         self.engine = JarvisEngine()
+        self.engine.hud = self.hud
         
         # Start background Audio Service
         from services.audio_service import audio_service

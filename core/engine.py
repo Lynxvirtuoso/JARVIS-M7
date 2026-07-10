@@ -643,11 +643,11 @@ class JarvisEngine(QObject):
         normalized = cmd.lower().strip()
         if normalized == "/help":
             help_text = (
-                "Hello Sir! I am JARVIS M7.\n\n"
-                "*Available Controls*:\n"
-                "- Send any plain command to control me (e.g. 'what time is it', 'open notepad')\n"
-                "- `/status` — View system state and active AI providers\n"
-                "- `/cancel` — Cancel any pending confirmation"
+                "<b>Hello Sir! I am JARVIS M7.</b>\n\n"
+                "<b>Available Controls</b>:\n"
+                "- Send any plain command to control me (e.g., <code>what time is it</code>, <code>open notepad</code>)\n"
+                "- <code>/status</code> — View system state and active AI providers\n"
+                "- <code>/cancel</code> — Cancel any pending confirmation"
             )
             self.telegram_bot.send_message(chat_id, help_text)
         elif normalized == "/status":
@@ -658,12 +658,12 @@ class JarvisEngine(QObject):
             session = "Active" if getattr(self, "in_session", False) else "Inactive"
             
             status_text = (
-                "--- JARVIS SYSTEM STATUS ---\n"
-                f"State: {state}\n"
-                f"Session: {session}\n"
-                f"STT Provider: {stt}\n"
-                f"Brain Provider: {brain_p}\n"
-                f"TTS Provider: {tts}"
+                "<b>--- JARVIS SYSTEM STATUS ---</b>\n"
+                f"<b>State:</b> <code>{state}</code>\n"
+                f"<b>Session:</b> <code>{session}</code>\n"
+                f"<b>STT Provider:</b> <code>{stt}</code>\n"
+                f"<b>Brain Provider:</b> <code>{brain_p}</code>\n"
+                f"<b>TTS Provider:</b> <code>{tts}</code>"
             )
             self.telegram_bot.send_message(chat_id, status_text)
         elif normalized == "/cancel":
@@ -1058,6 +1058,34 @@ class JarvisEngine(QObject):
 
         raw_command, rep_count = collapse_repeated_command(raw_command)
         is_low_confidence = (rep_count >= 3)
+
+        # Handle screenshot requests
+        cmd_norm = raw_command.lower().strip()
+        screenshot_keywords = {
+            "send me a screenshot of the hud",
+            "take a screenshot of the hud",
+            "screenshot of the hud",
+            "send me a screenshot",
+            "take a screenshot",
+            "screenshot"
+        }
+        if cmd_norm in screenshot_keywords:
+            hud = getattr(self, "hud", None)
+            filepath = os.path.join(os.getcwd(), "screenshots", "hud_telegram.png")
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            if hud and hud.isVisible():
+                hud.grab().save(filepath)
+                caption = "Here is the screenshot of the HUD, Sir."
+            else:
+                import pyautogui
+                pyautogui.screenshot(filepath)
+                caption = "Here is the full screen capture (HUD is hidden), Sir."
+                
+            if source == "telegram":
+                self.telegram_bot.send_photo(self.last_telegram_chat_id, filepath, caption)
+            else:
+                speech.speak("I have captured the screenshot for you, Sir.")
+            return
 
         # Calculate audio quality for voice source
         audio_quality = 1.0
@@ -1852,6 +1880,10 @@ class JarvisEngine(QObject):
                     f.write(f"# Mapped file created by JARVIS M7 on {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 
                 logger.info(f"File created successfully: '{filepath}'")
+                if getattr(self, "last_command_source", "") == "telegram":
+                    chat_id = getattr(self, "last_telegram_chat_id", None)
+                    if chat_id:
+                        self.telegram_bot.send_document(chat_id, filepath, f"Here is the created file: <b>{filename}</b>")
                 return f"I have successfully created the file {filename} in your {loc_disp}, {salutation}."
             except Exception as e:
                 logger.error(f"Failed to create file: {e}")
