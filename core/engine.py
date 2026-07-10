@@ -525,6 +525,16 @@ class JarvisEngine(QObject):
         bus.command_received.connect(self.on_typed_command_received)
         bus.speech_interrupted.connect(self.on_speech_interrupted)
 
+        # Telegram Bot integration
+        self.last_command_source = None
+        self.last_telegram_chat_id = None
+        self.pending_telegram_confirm = None
+        
+        from services.telegram_bot import TelegramBotService
+        self.telegram_bot = TelegramBotService(self)
+        self.telegram_bot.message_received.connect(self.on_telegram_message_received)
+        self.telegram_bot.start()
+
     @pyqtSlot()
     def on_speech_interrupted(self):
         logger.info("Engine received speech_interrupted signal. Resetting confirmation states and returning to session/passive.")
@@ -558,10 +568,67 @@ class JarvisEngine(QObject):
         # Process the command directly
         self._process_received_command(cmd, source="typed")
 
+    @pyqtSlot(str, int)
+    def on_telegram_message_received(self, text, chat_id):
+        self.last_command_source = "telegram"
+        self.last_telegram_chat_id = chat_id
+        
+        cmd = text.strip()
+        has_prefix, stripped = self.strip_session_prefix(cmd)
+        if has_prefix:
+            cmd = stripped
+            
+        # 1. Blocking confirmation state check
+        if self.pending_telegram_confirm:
+            import time
+            elapsed = time.time() - self.pending_telegram_confirm["timestamp"]
+            if elapsed < 60 and self.pending_telegram_confirm["chat_id"] == chat_id:
+                normalized_ans = cmd.lower().strip()
+                yes_indicators = ["yes", "yeah", "correct", "confirm", "do it", "proceed", "okay", "ok"]
+                no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont"]
+                
+                def _is_match(indicator: str, response: str) -> bool:
+                    import re
+                    return bool(re.search(rf"\b{re.escape(indicator)}\b", response))
+                
+                if any(_is_match(ans, normalized_ans) for ans in yes_indicators):
+                    cmd_to_run = self.pending_telegram_confirm["command"]
+                    self.pending_telegram_confirm = None
+                    self.telegram_bot.send_message(chat_id, f"Executing: {cmd_to_run}")
+                    self._process_received_command(cmd_to_run, source="telegram")
+                elif any(_is_match(ans, normalized_ans) for ans in no_indicators):
+                    self.pending_telegram_confirm = None
+                    self.telegram_bot.send_message(chat_id, "Command cancelled.")
+                else:
+                    self.telegram_bot.send_message(chat_id, "A confirmation is pending. Please reply with 'yes' or 'no' first.")
+                return
+            else:
+                self.pending_telegram_confirm = None
+
+        # 2. Process command normally
+        self._process_received_command(cmd, source="telegram")
+
     # -----------------------------------------------------------------------
     # State machine
     # -----------------------------------------------------------------------
     def transition_to(self, new_state):
+        if new_state == "WAITING_FOR_CONFIRMATION" and getattr(self, "last_command_source", "") == "telegram":
+            import time
+            self.pending_telegram_confirm = {
+                "command": self.pending_command,
+                "timestamp": time.time(),
+                "chat_id": self.last_telegram_chat_id
+            }
+            self.pending_command = None
+            self.pending_command_type = None
+            self.telegram_bot.send_message(self.last_telegram_chat_id, f"Did you mean: {self.pending_telegram_confirm['command']}? (yes/no)")
+            
+            if self.in_session:
+                QTimer.singleShot(0, lambda: self.transition_to("SESSION_LISTENING"))
+            else:
+                QTimer.singleShot(0, lambda: self._return_to_passive())
+            return
+
         if self.state != new_state:
             old_state = self.state
             self.state = new_state
@@ -895,6 +962,7 @@ class JarvisEngine(QObject):
     # Core command routing
     # -----------------------------------------------------------------------
     def _process_received_command(self, raw_command, source="voice"):
+        self.last_command_source = source
         self.wake_timer.stop()
         salutation = config.salutation
 
@@ -1495,6 +1563,10 @@ class JarvisEngine(QObject):
     @pyqtSlot(str)
     def _on_worker_response(self, response):
         self.transition_to("SPEAKING_RESPONSE")
+        if getattr(self, "last_command_source", "") == "telegram":
+            chat_id = getattr(self, "last_telegram_chat_id", None)
+            if chat_id:
+                self.telegram_bot.send_message(chat_id, response)
         if getattr(self, "streamed_fallback_active", False):
             self.streamed_fallback_active = False
             logger.info("Fallback response was streamed and already sent to speech service. Bypassing repeat speak.")
@@ -1507,11 +1579,19 @@ class JarvisEngine(QObject):
         logger.error(f"CommandWorker failed: {error}")
         salutation = config.salutation
         self.transition_to("SPEAKING_RESPONSE")
+        if getattr(self, "last_command_source", "") == "telegram":
+            chat_id = getattr(self, "last_telegram_chat_id", None)
+            if chat_id:
+                self.telegram_bot.send_message(chat_id, f"Sorry {salutation}, an error occurred while executing the command: {error}")
         speech.speak(f"Sorry {salutation}, an error occurred while executing the command.")
         self._schedule_return_to_session_after_speech()
 
     def _speak_and_return_to_session(self, text):
         self.transition_to("SPEAKING_RESPONSE")
+        if getattr(self, "last_command_source", "") == "telegram":
+            chat_id = getattr(self, "last_telegram_chat_id", None)
+            if chat_id:
+                self.telegram_bot.send_message(chat_id, text)
         speech.speak(text)
         self._schedule_return_to_session_after_speech()
 
