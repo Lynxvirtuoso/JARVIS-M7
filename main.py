@@ -111,6 +111,15 @@ class JarvisApp(QObject):
 
 def main():
     logger.info("Starting JARVIS M7 OS...")
+    
+    import socket
+    global_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        global_lock_socket.bind(("127.0.0.1", 47777))
+    except socket.error:
+        logger.warning("Another instance of JARVIS is already running. Exiting.")
+        sys.exit(0)
+
     try:
         from core.autostart import reconcile_autostart_config
         reconcile_autostart_config()
