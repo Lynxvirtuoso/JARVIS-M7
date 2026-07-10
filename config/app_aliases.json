@@ -1,0 +1,31 @@
+{
+  "edge": [
+    "microsoft edge",
+    "ms edge",
+    "edge browser"
+  ],
+  "chrome": [
+    "google chrome",
+    "browser"
+  ],
+  "vs code": [
+    "visual studio code",
+    "vscode",
+    "code editor"
+  ],
+  "whatsapp": [
+    "whats app"
+  ],
+  "file explorer": [
+    "explorer",
+    "windows explorer",
+    "files"
+  ],
+  "calculator": [
+    "calc"
+  ],
+  "notepad": [
+    "note pad",
+    "notes"
+  ]
+}

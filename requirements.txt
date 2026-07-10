@@ -1,0 +1,28 @@
+# PyQt6 GUI
+PyQt6>=6.4.0
+PyQt6-Qt6>=6.4.0
+
+# Sound and Audio Processing
+sounddevice>=0.4.5
+numpy>=1.20.0
+soundfile>=0.12.1
+
+# Speech and Voice
+faster-whisper>=0.10.0
+kokoro-onnx>=0.3.0
+onnxruntime>=1.16.0
+
+# Windows System Access
+pywin32>=306
+pycaw>=20181226
+psutil>=5.9.0
+pyautogui>=0.9.54
+pywinauto>=0.6.8
+
+# AI Brain API
+google-genai>=0.1.0
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+websockets>=11.0
+pynput>=1.8.2

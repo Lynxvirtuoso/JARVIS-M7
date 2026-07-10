@@ -1,0 +1,13 @@
+{
+    "brain_provider": "groq",
+    "ollama_model": "qwen2.5:1.5b",
+    "gemini_quota_saver_mode": true,
+    "tts_provider": "kokoro",
+    "kokoro_model_path": "models/kokoro-v1.0.onnx",
+    "kokoro_voices_path": "models/voices-v1.0.bin",
+    "tts_voice_id": "am_michael",
+    "stt_provider": "groq_stt",
+    "whisper_model": "small.en",
+    "followup_window_seconds": "2",
+    "autostart_enabled": true
+}

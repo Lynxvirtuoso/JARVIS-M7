@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.vscode/
+.idea/
+logs/
+data/app_index.json
+
+# Large files & binaries
+models/
+*.zip
+*.db
+database/jarvis.db
