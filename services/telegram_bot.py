@@ -99,7 +99,7 @@ class TelegramBotService(QThread):
                     user_id = from_user.get("id")
 
                     if user_id != self.allowed_user_id:
-                        logger.debug(f"Silently ignoring message from unauthorized user ID: {user_id}")
+                        logger.warning(f"Silently ignoring message from unauthorized user ID: {user_id} (Expected: {self.allowed_user_id})")
                         continue
 
                     chat = message.get("chat", {})
