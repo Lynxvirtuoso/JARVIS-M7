@@ -74,7 +74,8 @@ class TelegramBotService(QThread):
                         from_user = callback_query.get("from", {})
                         user_id = from_user.get("id")
 
-                        if user_id != self.allowed_user_id:
+                        if str(user_id).strip() != str(self.allowed_user_id).strip():
+                            logger.warning(f"Silently ignoring callback query from unauthorized user ID: {user_id} (Expected: {self.allowed_user_id})")
                             continue
 
                         callback_id = callback_query.get("id")
@@ -98,7 +99,7 @@ class TelegramBotService(QThread):
                     from_user = message.get("from", {})
                     user_id = from_user.get("id")
 
-                    if user_id != self.allowed_user_id:
+                    if str(user_id).strip() != str(self.allowed_user_id).strip():
                         logger.warning(f"Silently ignoring message from unauthorized user ID: {user_id} (Expected: {self.allowed_user_id})")
                         continue
 
