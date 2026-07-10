@@ -533,6 +533,8 @@ class JarvisEngine(QObject):
         from services.telegram_bot import TelegramBotService
         self.telegram_bot = TelegramBotService(self)
         self.telegram_bot.message_received.connect(self.on_telegram_message_received)
+        self.telegram_bot.callback_received.connect(self.on_telegram_message_received)
+        bus.stream_token_received.connect(self.on_stream_token_received)
         self.telegram_bot.start()
 
     @pyqtSlot()
@@ -573,6 +575,9 @@ class JarvisEngine(QObject):
         self.last_command_source = "telegram"
         self.last_telegram_chat_id = chat_id
         
+        # Trigger typing indicator
+        self.telegram_bot.send_typing_indicator(chat_id)
+        
         cmd = text.strip()
         has_prefix, stripped = self.strip_session_prefix(cmd)
         if has_prefix:
@@ -580,33 +585,105 @@ class JarvisEngine(QObject):
             
         # 1. Blocking confirmation state check
         if self.pending_telegram_confirm:
-            import time
-            elapsed = time.time() - self.pending_telegram_confirm["timestamp"]
-            if elapsed < 60 and self.pending_telegram_confirm["chat_id"] == chat_id:
-                normalized_ans = cmd.lower().strip()
-                yes_indicators = ["yes", "yeah", "correct", "confirm", "do it", "proceed", "okay", "ok"]
-                no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont"]
-                
-                def _is_match(indicator: str, response: str) -> bool:
-                    import re
-                    return bool(re.search(rf"\b{re.escape(indicator)}\b", response))
-                
-                if any(_is_match(ans, normalized_ans) for ans in yes_indicators):
-                    cmd_to_run = self.pending_telegram_confirm["command"]
-                    self.pending_telegram_confirm = None
-                    self.telegram_bot.send_message(chat_id, f"Executing: {cmd_to_run}")
-                    self._process_received_command(cmd_to_run, source="telegram")
-                elif any(_is_match(ans, normalized_ans) for ans in no_indicators):
-                    self.pending_telegram_confirm = None
-                    self.telegram_bot.send_message(chat_id, "Command cancelled.")
-                else:
-                    self.telegram_bot.send_message(chat_id, "A confirmation is pending. Please reply with 'yes' or 'no' first.")
+            resolved = self.resolve_telegram_confirmation(cmd, chat_id)
+            if resolved:
                 return
             else:
-                self.pending_telegram_confirm = None
+                if cmd.lower().startswith(("/help", "/status")):
+                    pass
+                else:
+                    self.telegram_bot.send_message(chat_id, "A confirmation is pending. Please answer the Confirm/Cancel prompt first.")
+                    return
 
-        # 2. Process command normally
+        # 2. Handle slash commands
+        if cmd.startswith("/"):
+            self.handle_telegram_slash_command(cmd, chat_id)
+            return
+
+        # 3. Process command normally
         self._process_received_command(cmd, source="telegram")
+
+    def resolve_telegram_confirmation(self, response_text, chat_id) -> bool:
+        if not self.pending_telegram_confirm:
+            return False
+            
+        import time
+        elapsed = time.time() - self.pending_telegram_confirm["timestamp"]
+        if elapsed >= 60 or self.pending_telegram_confirm["chat_id"] != chat_id:
+            self.pending_telegram_confirm = None
+            return False
+
+        normalized = response_text.lower().strip()
+        yes_indicators = ["yes", "yeah", "correct", "confirm", "do it", "proceed", "okay", "ok", "confirm_yes"]
+        no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "confirm_no", "/cancel"]
+
+        def _is_match(indicator: str, response: str) -> bool:
+            import re
+            return bool(re.search(rf"\b{re.escape(indicator)}\b", response))
+
+        # Clear inline buttons from original message if we have message_id
+        msg_id = self.pending_telegram_confirm.get("message_id")
+        if msg_id:
+            self.telegram_bot.remove_inline_keyboard(chat_id, msg_id)
+
+        if any(_is_match(ans, normalized) or ans == normalized for ans in yes_indicators):
+            cmd_to_run = self.pending_telegram_confirm["command"]
+            self.pending_telegram_confirm = None
+            self.telegram_bot.send_message(chat_id, f"Executing: {cmd_to_run}")
+            self._process_received_command(cmd_to_run, source="telegram")
+            return True
+        elif any(_is_match(ans, normalized) or ans == normalized for ans in no_indicators):
+            self.pending_telegram_confirm = None
+            self.telegram_bot.send_message(chat_id, "Command cancelled.")
+            return True
+            
+        return False
+
+    def handle_telegram_slash_command(self, cmd, chat_id):
+        normalized = cmd.lower().strip()
+        if normalized == "/help":
+            help_text = (
+                "Hello Sir! I am JARVIS M7.\n\n"
+                "*Available Controls*:\n"
+                "- Send any plain command to control me (e.g. 'what time is it', 'open notepad')\n"
+                "- `/status` — View system state and active AI providers\n"
+                "- `/cancel` — Cancel any pending confirmation"
+            )
+            self.telegram_bot.send_message(chat_id, help_text)
+        elif normalized == "/status":
+            stt = config.get("stt_provider", "default")
+            brain_p = config.get("brain_provider", "default")
+            tts = config.get("tts_provider", "default")
+            state = getattr(self, "state", "UNKNOWN")
+            session = "Active" if getattr(self, "in_session", False) else "Inactive"
+            
+            status_text = (
+                "--- JARVIS SYSTEM STATUS ---\n"
+                f"State: {state}\n"
+                f"Session: {session}\n"
+                f"STT Provider: {stt}\n"
+                f"Brain Provider: {brain_p}\n"
+                f"TTS Provider: {tts}"
+            )
+            self.telegram_bot.send_message(chat_id, status_text)
+        elif normalized == "/cancel":
+            if self.pending_telegram_confirm:
+                self.resolve_telegram_confirmation("/cancel", chat_id)
+            else:
+                self.telegram_bot.send_message(chat_id, "No pending confirmation to cancel, Sir.")
+
+    @pyqtSlot(str)
+    def on_stream_token_received(self, sentence):
+        if getattr(self, "last_command_source", "") == "telegram":
+            chat_id = getattr(self, "last_telegram_chat_id", None)
+            msg_id = getattr(self, "last_telegram_message_id", None)
+            if chat_id and msg_id:
+                curr = getattr(self, "streamed_telegram_text", "")
+                if not curr:
+                    self.streamed_telegram_text = sentence
+                else:
+                    self.streamed_telegram_text += " " + sentence
+                self.telegram_bot.edit_message(chat_id, msg_id, self.streamed_telegram_text)
 
     # -----------------------------------------------------------------------
     # State machine
@@ -617,17 +694,30 @@ class JarvisEngine(QObject):
             self.pending_telegram_confirm = {
                 "command": self.pending_command,
                 "timestamp": time.time(),
-                "chat_id": self.last_telegram_chat_id
+                "chat_id": self.last_telegram_chat_id,
+                "message_id": None
             }
             self.pending_command = None
             self.pending_command_type = None
-            self.telegram_bot.send_message(self.last_telegram_chat_id, f"Did you mean: {self.pending_telegram_confirm['command']}? (yes/no)")
+            
+            msg_id = self.telegram_bot.send_confirmation_keyboard(
+                self.last_telegram_chat_id, 
+                f"Did you mean: {self.pending_telegram_confirm['command']}?"
+            )
+            self.pending_telegram_confirm["message_id"] = msg_id
             
             if self.in_session:
                 QTimer.singleShot(0, lambda: self.transition_to("SESSION_LISTENING"))
             else:
                 QTimer.singleShot(0, lambda: self._return_to_passive())
             return
+
+        if new_state == "EXECUTING_COMMAND" and getattr(self, "last_command_source", "") == "telegram":
+            chat_id = getattr(self, "last_telegram_chat_id", None)
+            if chat_id:
+                msg_id = self.telegram_bot.send_message_and_get_id(chat_id, "Thinking...")
+                self.last_telegram_message_id = msg_id
+                self.streamed_telegram_text = ""
 
         if self.state != new_state:
             old_state = self.state
