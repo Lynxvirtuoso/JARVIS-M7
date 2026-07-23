@@ -6,7 +6,7 @@ confidence scoring, sensitive action protection, and clarification question gene
 """
 import re
 from typing import List, Optional, Tuple
-from services.conversation.models import ResolvedTranscript
+from services.conversation.models import ResolvedTranscript, SensitiveActionType
 
 
 WAKE_VARIANTS = [r"\bjarvis\b", r"\bjervis\b", r"\bjavis\b", r"\bhey jarvis\b"]
@@ -112,11 +112,34 @@ class TranscriptResolver:
                 wake_word_position=wake_pos,
                 needs_clarification=True,
                 clarification_question=clarification_question,
-                is_sensitive_action=is_sensitive
+                is_sensitive_action=is_sensitive,
+                sensitive_action_type=SensitiveActionType.AMBIGUOUS_SHUTDOWN if is_sensitive else None
             )
 
         # Check general sensitive action keywords (checking both cleaned text and full raw text)
         is_sensitive = any(kw in cleaned_text.lower() or kw in text_lower for kw in SENSITIVE_KEYWORDS)
+        sensitive_type = None
+        if is_sensitive:
+            if any(k in text_lower for k in ["close jarvis", "exit app", "close application", "exit jarvis"]):
+                sensitive_type = SensitiveActionType.EXIT_APPLICATION
+            elif any(k in text_lower for k in ["shut down pc", "shutdown computer", "turn off pc"]):
+                sensitive_type = SensitiveActionType.SHUTDOWN_COMPUTER
+            elif any(k in text_lower for k in ["restart pc", "reboot computer", "reboot"]):
+                sensitive_type = SensitiveActionType.RESTART_COMPUTER
+            elif any(k in text_lower for k in ["log out", "logout"]):
+                sensitive_type = SensitiveActionType.LOG_OUT_WINDOWS
+            elif any(k in text_lower for k in ["lock pc", "lock computer"]):
+                sensitive_type = SensitiveActionType.LOCK_COMPUTER
+            elif any(k in text_lower for k in ["delete"]):
+                sensitive_type = SensitiveActionType.DELETE_FILE
+            elif any(k in text_lower for k in ["send email"]):
+                sensitive_type = SensitiveActionType.SEND_EMAIL
+            elif any(k in text_lower for k in ["send message"]):
+                sensitive_type = SensitiveActionType.SEND_MESSAGE
+            elif any(k in text_lower for k in ["place call", "call"]):
+                sensitive_type = SensitiveActionType.PLACE_CALL
+            else:
+                sensitive_type = SensitiveActionType.AMBIGUOUS_SHUTDOWN
 
         # Decision thresholding
         needs_clarification = False
@@ -137,7 +160,8 @@ class TranscriptResolver:
             wake_word_position=wake_pos,
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
-            is_sensitive_action=is_sensitive
+            is_sensitive_action=is_sensitive,
+            sensitive_action_type=sensitive_type
         )
 
     def _detect_and_strip_wake_word(self, text_lower: str, original_text: str) -> Tuple[bool, Optional[str], str]:

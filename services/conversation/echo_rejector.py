@@ -8,6 +8,7 @@ import re
 from difflib import SequenceMatcher
 from typing import List, Optional
 from core.logger import logger
+from services.conversation.models import InterruptDecision
 
 EXPLICIT_INTERRUPT_PATTERNS = [
     r"^\s*stop(?:\s+speaking)?\s*[.!?]*$",
@@ -39,41 +40,64 @@ class EchoRejector:
                 return True
         return False
 
-    def is_echo(
+    def evaluate_interrupt(
         self,
         transcript: str,
         current_spoken_sentence: Optional[str],
         recent_spoken_sentences: List[str],
         request_id: Optional[str] = None,
         similarity_threshold: float = 0.55
-    ) -> bool:
-        """
-        Evaluates whether an STT transcript received during TTS playback is assistant echo or genuine user interruption.
-        Returns:
-            True  -> Assistant Echo / Noise / Irrelevant (REJECT interruption, do not halt playback)
-            False -> Genuine User Interruption (ACCEPT interruption, halt playback immediately)
-        """
+    ) -> InterruptDecision:
+        req_id = request_id or "unknown"
+
         if not transcript or not transcript.strip():
-            logger.info(f"Interrupt rejected | Reason: empty_transcript | Req ID: {request_id[:8] if request_id else 'None'}")
-            return True
+            logger.info(f"Interrupt decision | Accepted: False | Reason: empty_transcript | Req ID: {req_id[:8]}")
+            return InterruptDecision(
+                accepted=False,
+                reason="empty_transcript",
+                normalized_text="",
+                similarity=0.0,
+                word_overlap=0.0,
+                request_id=req_id
+            )
 
         text_clean = re.sub(r"[^\w\s]", "", transcript.strip().lower()).strip()
         if not text_clean:
-            logger.info(f"Interrupt rejected | Reason: empty_punctuation | Req ID: {request_id[:8] if request_id else 'None'}")
-            return True
-
-        # Check explicit interruption keywords first (Stop, Pause, Cancel, Wait, Hold on, No, Actually, etc.)
-        if self.is_explicit_interrupt(text_clean):
-            logger.info(
-                f"Interrupt accepted | Reason: explicit_keyword | Text: '{text_clean}' | Req ID: {request_id[:8] if request_id else 'None'}"
+            logger.info(f"Interrupt decision | Accepted: False | Reason: empty_punctuation | Req ID: {req_id[:8]}")
+            return InterruptDecision(
+                accepted=False,
+                reason="empty_punctuation",
+                normalized_text="",
+                similarity=0.0,
+                word_overlap=0.0,
+                request_id=req_id
             )
-            return False
+
+        # Explicit keyword check (Stop, Wait, Cancel, Pause, Hold on, No, Actually)
+        if self.is_explicit_interrupt(text_clean):
+            reason = "explicit_stop" if "stop" in text_clean else ("correction" if "actually" in text_clean else "explicit_keyword")
+            logger.info(f"Interrupt decision | Accepted: True | Reason: {reason} | Text: '{text_clean}' | Req ID: {req_id[:8]}")
+            return InterruptDecision(
+                accepted=True,
+                reason=reason,
+                normalized_text=text_clean,
+                similarity=0.0,
+                word_overlap=0.0,
+                request_id=req_id
+            )
 
         if len(text_clean) < 3:
-            logger.info(f"Interrupt rejected | Reason: too_short | Text: '{text_clean}' | Req ID: {request_id[:8] if request_id else 'None'}")
-            return True
+            logger.info(f"Interrupt decision | Accepted: False | Reason: too_short | Text: '{text_clean}' | Req ID: {req_id[:8]}")
+            return InterruptDecision(
+                accepted=False,
+                reason="too_short",
+                normalized_text=text_clean,
+                similarity=0.0,
+                word_overlap=0.0,
+                request_id=req_id
+            )
 
-        # Compare against active spoken sentence and recent sentences
+        # Calculate similarity & overlap against spoken sentences
         max_similarity = 0.0
         max_overlap = 0.0
         matched_text = ""
@@ -100,28 +124,65 @@ class EchoRejector:
                 overlap = len(trans_words.intersection(target_words)) / float(len(trans_words))
                 if overlap > max_overlap:
                     max_overlap = overlap
-                    if score > max_similarity:
-                        matched_text = target_lower
 
         if max_similarity >= similarity_threshold or max_overlap >= 0.50:
             logger.info(
-                f"Interrupt rejected as echo | Similarity: {max_similarity:.2f} | Overlap: {max_overlap:.2f} | "
-                f"Matched: '{matched_text[:25]}...' | Req ID: {request_id[:8] if request_id else 'None'}"
+                f"Interrupt decision | Accepted: False | Reason: assistant_echo | Similarity: {max_similarity:.2f} | "
+                f"Overlap: {max_overlap:.2f} | Matched: '{matched_text[:25]}...' | Req ID: {req_id[:8]}"
             )
-            return True
+            return InterruptDecision(
+                accepted=False,
+                reason="assistant_echo",
+                normalized_text=text_clean,
+                similarity=max_similarity,
+                word_overlap=max_overlap,
+                request_id=req_id
+            )
 
-        # Reject short non-explicit transcripts (2 words or less that don't match explicit keywords)
         words = text_clean.split()
         if len(words) <= 2:
-            logger.info(
-                f"Interrupt rejected | Reason: short_non_explicit | Text: '{text_clean}' | Req ID: {request_id[:8] if request_id else 'None'}"
+            logger.info(f"Interrupt decision | Accepted: False | Reason: short_non_explicit | Text: '{text_clean}' | Req ID: {req_id[:8]}")
+            return InterruptDecision(
+                accepted=False,
+                reason="short_non_explicit",
+                normalized_text=text_clean,
+                similarity=max_similarity,
+                word_overlap=max_overlap,
+                request_id=req_id
             )
-            return True
 
-        logger.info(
-            f"Interrupt accepted | Reason: distinct_user_speech | Text: '{text_clean}' | Req ID: {request_id[:8] if request_id else 'None'}"
+        logger.info(f"Interrupt decision | Accepted: True | Reason: distinct_user_interruption | Text: '{text_clean}' | Req ID: {req_id[:8]}")
+        return InterruptDecision(
+            accepted=True,
+            reason="distinct_user_interruption",
+            normalized_text=text_clean,
+            similarity=max_similarity,
+            word_overlap=max_overlap,
+            request_id=req_id
         )
-        return False
+
+    def is_echo(
+        self,
+        transcript: str,
+        current_spoken_sentence: Optional[str],
+        recent_spoken_sentences: List[str],
+        request_id: Optional[str] = None,
+        similarity_threshold: float = 0.55
+    ) -> bool:
+        """
+        Evaluates whether an STT transcript received during TTS playback is assistant echo.
+        Returns:
+            True  -> Assistant Echo / Noise / Irrelevant (REJECT interruption, do not halt playback)
+            False -> Genuine User Interruption (ACCEPT interruption, halt playback immediately)
+        """
+        decision = self.evaluate_interrupt(
+            transcript,
+            current_spoken_sentence,
+            recent_spoken_sentences,
+            request_id=request_id,
+            similarity_threshold=similarity_threshold
+        )
+        return not decision.accepted
 
 
 # Global echo rejector instance

@@ -1196,48 +1196,65 @@ class JarvisEngine(QObject):
         self.wake_timer.stop()
         salutation = config.salutation
 
-        if self.pending_command:
+        if getattr(self, "pending_confirmation_obj", None) or self.pending_command:
             normalized_ans = raw_text.lower().strip()
             logger.info(f"Confirmation response [Req ID: {request_id[:8]}]: '{raw_text}'")
 
+            # Check expiration
+            conf_obj = getattr(self, "pending_confirmation_obj", None)
+            if conf_obj and time.time() > conf_obj.expires_at:
+                logger.info(f"Pending confirmation expired for req {conf_obj.request_id[:8]}")
+                self.pending_confirmation_obj = None
+                self.pending_command = None
+                self.pending_command_type = None
+                self.transition_to("SPEAKING_RESPONSE")
+                speech.speak(f"Confirmation expired, {salutation}.", request_id=request_id)
+                self._schedule_return_to_session_after_speech()
+                return
+
             yes_indicators = ["yes", "yeah", "correct", "confirm", "do it", "proceed", "okay", "ok"]
-            no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "never mind", "don't"]
+            no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "never mind", "don't", "stop"]
 
             def _is_match(indicator: str, response: str) -> bool:
                 return bool(re.search(rf"\b{re.escape(indicator)}\b", response))
 
             if any(_is_match(ans, normalized_ans) for ans in yes_indicators):
-                logger.info(f"Confirmed. Running type: {self.pending_command_type}, command: {self.pending_command}")
                 cmd_to_run = self.pending_command
                 cmd_type = self.pending_command_type
+                action_type = conf_obj.action_type if conf_obj else None
+                self.pending_confirmation_obj = None
                 self.pending_command = None
                 self.pending_command_type = None
                 self.misheard_command = None
 
-                if cmd_type in ("lifecycle_sleep", "sensitive_action") and cmd_to_run in ("shut down", "shutdown", "sleep"):
-                    self.sleep_jarvis()
-                elif cmd_type in ("lifecycle_exit", "sensitive_action") and cmd_to_run in ("exit app", "close jarvis"):
+                logger.info(f"Action confirmed [Type: {action_type}, Payload: {cmd_to_run}]")
+                from services.conversation.models import SensitiveActionType
+                if action_type == SensitiveActionType.EXIT_APPLICATION or cmd_to_run in ("exit app", "close jarvis"):
                     self.full_exit_jarvis()
+                elif action_type == SensitiveActionType.SHUTDOWN_COMPUTER or cmd_to_run in ("shut down", "shutdown", "sleep"):
+                    self.sleep_jarvis()
                 else:
                     self.transition_to("TRANSCRIBING_COMMAND")
                     self._launch_worker(cmd_to_run)
                 return
             elif any(_is_match(ans, normalized_ans) for ans in no_indicators):
                 logger.info("Command rejected/cancelled by user.")
+                self.pending_confirmation_obj = None
                 self.pending_command = None
                 self.pending_command_type = None
                 self.misheard_command = None
                 self.transition_to("SPEAKING_RESPONSE")
-                speech.speak(f"Command cancelled, {salutation}.")
+                speech.speak(f"Command cancelled, {salutation}.", request_id=request_id)
                 self._schedule_return_to_session_after_speech()
                 return
             else:
                 logger.info("Unclear confirmation reply.")
+                self.pending_confirmation_obj = None
                 self.pending_command = None
                 self.pending_command_type = None
                 self.misheard_command = None
                 self.transition_to("SPEAKING_RESPONSE")
-                speech.speak(f"Request cancelled, {salutation}.")
+                speech.speak(f"Request cancelled, {salutation}.", request_id=request_id)
                 self._schedule_return_to_session_after_speech()
                 return
 
@@ -1255,24 +1272,56 @@ class JarvisEngine(QObject):
             f"Clarify: {resolved_tr.needs_clarification} | Sensitive: {resolved_tr.is_sensitive_action}"
         )
 
+        from services.conversation.models import PendingConfirmation, SensitiveActionType
         if resolved_tr.needs_clarification:
             if resolved_tr.is_sensitive_action or "shut down" in resolved_tr.resolved_text.lower():
                 self.pending_command = resolved_tr.resolved_text
                 self.pending_command_type = "sensitive_action"
+                self.pending_confirmation_obj = PendingConfirmation(
+                    request_id=request_id,
+                    session_id=getattr(req, "session_id", "default_session"),
+                    action_type=resolved_tr.sensitive_action_type or SensitiveActionType.AMBIGUOUS_SHUTDOWN,
+                    action_payload={"command": resolved_tr.resolved_text},
+                    source=source,
+                    created_at=time.time(),
+                    expires_at=time.time() + 30.0
+                )
                 self.transition_to("WAITING_FOR_CONFIRMATION")
-                speech.speak(resolved_tr.clarification_question or f"Did you ask me to {resolved_tr.resolved_text}?")
+                speech.speak(resolved_tr.clarification_question or f"Did you ask me to {resolved_tr.resolved_text}?", request_id=request_id)
                 return
             else:
                 self.transition_to("SPEAKING_RESPONSE")
-                speech.speak(resolved_tr.clarification_question or "Sorry Sir, I could not understand.")
+                speech.speak(resolved_tr.clarification_question or "Sorry Sir, I could not understand.", request_id=request_id)
                 self._schedule_return_to_session_after_speech()
                 return
 
-        if resolved_tr.is_sensitive_action and source not in ("telegram", "typed"):
+        if resolved_tr.is_sensitive_action:
             self.pending_command = resolved_tr.resolved_text
             self.pending_command_type = "sensitive_action"
+            act_type = resolved_tr.sensitive_action_type or SensitiveActionType.AMBIGUOUS_SHUTDOWN
+            self.pending_confirmation_obj = PendingConfirmation(
+                request_id=request_id,
+                session_id=getattr(req, "session_id", "default_session"),
+                action_type=act_type,
+                action_payload={"command": resolved_tr.resolved_text},
+                source=source,
+                created_at=time.time(),
+                expires_at=time.time() + 30.0
+            )
             self.transition_to("WAITING_FOR_CONFIRMATION")
-            speech.speak(f"Do you want me to {resolved_tr.resolved_text}, {salutation}?")
+            if act_type == SensitiveActionType.AMBIGUOUS_SHUTDOWN:
+                prompt = "Do you want me to close JARVIS or shut down the computer?"
+            elif act_type == SensitiveActionType.EXIT_APPLICATION:
+                prompt = f"Do you want me to close JARVIS, {salutation}?"
+            elif act_type == SensitiveActionType.SHUTDOWN_COMPUTER:
+                prompt = f"Do you want me to shut down your PC, {salutation}?"
+            elif act_type == SensitiveActionType.RESTART_COMPUTER:
+                prompt = f"Do you want me to restart your PC, {salutation}?"
+            elif act_type == SensitiveActionType.LOG_OUT_WINDOWS:
+                prompt = f"Do you want me to log out of your PC, {salutation}?"
+            else:
+                prompt = f"Do you want me to {resolved_tr.resolved_text}, {salutation}?"
+            speech.speak(prompt, request_id=request_id)
             return
 
         raw_command_str = raw_text
