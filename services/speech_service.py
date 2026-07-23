@@ -53,20 +53,24 @@ class SpeechEngine(threading.Thread):
         cooldown_ms = int(config.get("tts_mic_cooldown_ms", "800"))
         return (time.time() - self.speech_end_time) < (cooldown_ms / 1000.0)
 
-    def start_request(self, request_id: str):
+    def start_request(self, request_id: str) -> None:
         with self._lifecycle_lock:
             self.active_request_id = request_id
-            if request_id not in self._lifecycles:
-                self._lifecycles[request_id] = SpeechLifecycleState(request_id=request_id)
-            else:
-                self._lifecycles[request_id].cancelled = False
-                self._lifecycles[request_id].speech_ended_emitted = False
+            self._lifecycles[request_id] = SpeechLifecycleState(
+                request_id=request_id,
+                producer_finished=False,
+                synthesis_active=False,
+                speech_ended_emitted=False,
+                cancelled=False,
+            )
 
-    def mark_producer_finished(self, request_id: str):
+    def mark_producer_finished(self, request_id: str) -> None:
         with self._lifecycle_lock:
             state = self._lifecycles.get(request_id)
-            if state:
-                state.producer_finished = True
+            if state is None:
+                return
+            state.producer_finished = True
+
         self._check_and_emit_speech_ended(request_id)
 
     def cancel_request(self, request_id: str):
@@ -90,6 +94,10 @@ class SpeechEngine(threading.Thread):
 
             # Never emit speech_ended while LLM producer stream is still producing text chunks
             if not state.producer_finished:
+                return
+
+            from services.tts.streaming_tts_queue import streaming_tts_queue
+            if streaming_tts_queue.active_request_id and streaming_tts_queue.active_request_id != req_id:
                 return
 
             is_idle = (
@@ -123,7 +131,7 @@ class SpeechEngine(threading.Thread):
         if req_id_str:
             self.start_request(req_id_str)
             from services.tts.streaming_tts_queue import streaming_tts_queue
-            streaming_tts_queue._active_request_id = req_id_str
+            streaming_tts_queue.start_new_request(request_id=req_id_str)
 
         self.queue.put((sanitized, ctx))
 
@@ -347,4 +355,3 @@ class SpeechService:
 
 
 speech = SpeechService.get_instance()
-

@@ -1302,11 +1302,18 @@ class JarvisEngine(QObject):
                 return
 
         # TranscriptResolver handling
+        session_active = self.state in {
+            "SESSION_LISTENING",
+            "ACTIVE_COMMAND_LISTENING",
+            "WAITING_FOR_FOLLOWUP",
+            "WAITING_FOR_CONFIRMATION",
+        } or getattr(self, "in_session", False)
         from services.conversation.transcript_resolver import transcript_resolver
         resolved_tr = transcript_resolver.resolve(
             raw_text,
             stt_confidence=stt_confidence,
-            audio_quality=audio_quality
+            audio_quality=audio_quality,
+            session_active=session_active,
         )
         logger.info(
             f"TranscriptResolver | Req ID: {request_id[:8]} | Raw: '{raw_text}' | "

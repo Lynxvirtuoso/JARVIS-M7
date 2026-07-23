@@ -40,7 +40,7 @@ PHONETIC_CORRECTIONS = [
         "Did you mean open VS Code or Chrome?"
     ),
     (
-        r"^surya\s+derm[uÃº]\s+pono\b",
+        r"^surya\s+derm[uú]\s+pono\b",
         "system status",
         False,
         "Did you mean system status?"
@@ -60,7 +60,8 @@ class TranscriptResolver:
         raw_text: str,
         *,
         stt_confidence: Optional[float] = None,
-        audio_quality: float = 1.0
+        audio_quality: float = 1.0,
+        session_active: bool = False,
     ) -> ResolvedTranscript:
         if not raw_text or not raw_text.strip():
             return ResolvedTranscript(
@@ -102,6 +103,8 @@ class TranscriptResolver:
         effective_confidence = base_confidence * min(1.0, max(0.0, audio_quality))
         final_confidence = max(0.0, min(1.0, effective_confidence))
 
+        accepted_as_followup = session_active and not wake_detected
+
         if matched_correction:
             resolved_text, is_sensitive, clarification_question = matched_correction
             # Phonetic misrecognitions like 'Shadoon Jarvis' are inherently uncertain (medium/low confidence)
@@ -112,7 +115,7 @@ class TranscriptResolver:
                 confidence=resolved_confidence,
                 wake_word_detected=wake_detected,
                 wake_word_position=wake_pos,
-                accepted_as_active_session_followup=not wake_detected,
+                accepted_as_active_session_followup=accepted_as_followup,
                 needs_clarification=True,
                 clarification_question=clarification_question,
                 is_sensitive_action=is_sensitive,
@@ -161,7 +164,7 @@ class TranscriptResolver:
             confidence=final_confidence,
             wake_word_detected=wake_detected,
             wake_word_position=wake_pos,
-            accepted_as_active_session_followup=not wake_detected,
+            accepted_as_active_session_followup=accepted_as_followup,
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
             is_sensitive_action=is_sensitive,

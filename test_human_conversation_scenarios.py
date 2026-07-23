@@ -81,17 +81,31 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertEqual(res.wake_word_position, "middle")
         self.assertFalse(res.accepted_as_active_session_followup)
 
-    def test_no_wake_word_returns_followup_true(self):
-        """A follow-up without a wake word should have wake_word_detected=False and accepted_as_active_session_followup=True."""
-        res = self.resolver.resolve("What time is it?")
+    def test_no_wake_word_active_session_returns_followup_true(self):
+        """A follow-up without a wake word with active session should have accepted_as_active_session_followup=True."""
+        res = self.resolver.resolve("What time is it?", session_active=True)
         self.assertFalse(res.wake_word_detected)
         self.assertIsNone(res.wake_word_position)
         self.assertTrue(res.accepted_as_active_session_followup)
+
+    def test_no_wake_word_passive_returns_followup_false(self):
+        """A speech without a wake word in passive mode should have accepted_as_active_session_followup=False."""
+        res = self.resolver.resolve("What time is it?", session_active=False)
+        self.assertFalse(res.wake_word_detected)
+        self.assertIsNone(res.wake_word_position)
+        self.assertFalse(res.accepted_as_active_session_followup)
 
     def test_empty_transcript_followup_false(self):
         res = self.resolver.resolve("")
         self.assertFalse(res.wake_word_detected)
         self.assertFalse(res.accepted_as_active_session_followup)
+
+    def test_surya_dermu_pono_phonetic_corrections(self):
+        """Both Surya Dermu Pono and Surya Dermú Pono should resolve to system status."""
+        res1 = self.resolver.resolve("Surya Dermu Pono")
+        res2 = self.resolver.resolve("Surya Dermú Pono")
+        self.assertEqual(res1.resolved_text, "system status")
+        self.assertEqual(res2.resolved_text, "system status")
 
     # ----- 3. Sensitive Action Classification -----
 
@@ -460,7 +474,7 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         conf = None  # clear atomically
 
         # Second Yes: no conf available
-        action_to_execute_2 = conf  # None â€” no action
+        action_to_execute_2 = conf  # None - no action
         self.assertIsNone(action_to_execute_2)
         self.assertEqual(action_to_execute, SensitiveActionType.SHUTDOWN_COMPUTER)
 
@@ -478,6 +492,148 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         )
         is_expired = time.time() > conf.expires_at
         self.assertTrue(is_expired)
+
+    # ----- 14. Phase 1 Deadlock & Lifecycle Repair Tests -----
+
+    def test_mark_producer_finished_multithreaded_no_deadlock(self):
+        """mark_producer_finished run from a separate thread returns within 1.0s and does not deadlock."""
+        from services.speech_service import speech
+        req_id = "req-dl-001"
+        speech.start_request(req_id)
+
+        t = threading.Thread(target=speech.mark_producer_finished, args=(req_id,))
+        t.start()
+        t.join(timeout=1.0)
+
+        self.assertFalse(t.is_alive(), "mark_producer_finished deadlocked")
+        state = speech.engine._lifecycles.get(req_id)
+        self.assertIsNotNone(state)
+        self.assertTrue(state.producer_finished)
+
+    def test_start_request_fully_resets_speech_lifecycle_state(self):
+        """start_request creates a clean state object, clearing any previous stale counters or flags."""
+        from services.speech_service import speech
+        req_id = "req-reset-001"
+        speech.start_request(req_id)
+
+        # Pollute state
+        state = speech.engine._lifecycles[req_id]
+        state.producer_finished = True
+        state.synthesis_active = True
+        state.speech_ended_emitted = True
+        state.cancelled = True
+
+        # Re-start request
+        speech.start_request(req_id)
+        new_state = speech.engine._lifecycles[req_id]
+
+        self.assertFalse(new_state.producer_finished)
+        self.assertFalse(new_state.synthesis_active)
+        self.assertFalse(new_state.speech_ended_emitted)
+        self.assertFalse(new_state.cancelled)
+
+    def test_streaming_queue_encapsulation_and_invalidation(self):
+        """Request A is invalidated by Request B; late items from A are rejected."""
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+        req_A = "req-stream-A"
+        req_B = "req-stream-B"
+
+        streaming_tts_queue.start_new_request(request_id=req_A)
+        self.assertEqual(streaming_tts_queue.active_request_id, req_A)
+
+        streaming_tts_queue.start_new_request(request_id=req_B)
+        self.assertEqual(streaming_tts_queue.active_request_id, req_B)
+
+        rejected = streaming_tts_queue.enqueue_sentence(req_A, "Sentence from A")
+        self.assertFalse(rejected)
+
+        accepted = streaming_tts_queue.enqueue_sentence(req_B, "Sentence from B")
+        self.assertTrue(accepted)
+
+    def test_request_replacement_late_callback_and_cancellation_isolation(self):
+        """When request A is cancelled and request B starts, late callbacks from A do not emit speech_ended for B."""
+        from services.speech_service import speech
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+
+        req_A = "req-iso-A"
+        req_B = "req-iso-B"
+
+        speech.start_request(req_A)
+        streaming_tts_queue.start_new_request(request_id=req_A)
+
+        # Start request B (cancelling A implicitly in queue)
+        speech.cancel_request(req_A)
+        speech.start_request(req_B)
+        streaming_tts_queue.start_new_request(request_id=req_B)
+
+        # Late producer finish call for A
+        speech.mark_producer_finished(req_A)
+
+        # State for req_A should remain cancelled and speech_ended_emitted should be False
+        state_A = speech.engine._lifecycles.get(req_A)
+        self.assertTrue(state_A.cancelled)
+        self.assertFalse(state_A.speech_ended_emitted)
+
+    def test_correction_routing_late_callback_isolation(self):
+        """Correction interruption: request A cancelled, request B created, late sentence from A discarded."""
+        from services.speech_service import speech
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+
+        req_A = "req-corr-orig"
+        req_B = "corr-req-corr-new"
+
+        speech.start_request(req_A)
+        streaming_tts_queue.start_new_request(request_id=req_A)
+
+        # Simulate correction interruption action: cancel A, start B
+        speech.cancel_request(req_A)
+        streaming_tts_queue.cancel_active_request()
+
+        speech.start_request(req_B)
+        streaming_tts_queue.start_new_request(request_id=req_B)
+
+        # Late enqueue from A
+        accepted = streaming_tts_queue.enqueue_sentence(req_A, "Tell me about football.")
+        self.assertFalse(accepted)
+
+        # Enqueue from B
+        accepted_B = streaming_tts_queue.enqueue_sentence(req_B, "Tell me about American football.")
+        self.assertTrue(accepted_B)
+
+    def test_lifecycle_deadlock_stress_100_iterations(self):
+        """100-iteration stress test for lifecycle completion without deadlocks or hanging threads."""
+        from services.speech_service import speech
+
+        for i in range(100):
+            req_id = f"stress-req-{i:03d}"
+            speech.start_request(req_id)
+
+            # Thread 1: Mark synthesis started/finished
+            def _synth():
+                with speech.engine._lifecycle_lock:
+                    if req_id in speech.engine._lifecycles:
+                        speech.engine._lifecycles[req_id].synthesis_active = True
+                time.sleep(0.0001)
+                with speech.engine._lifecycle_lock:
+                    if req_id in speech.engine._lifecycles:
+                        speech.engine._lifecycles[req_id].synthesis_active = False
+
+            # Thread 2: Mark producer finished
+            def _prod():
+                time.sleep(0.0001)
+                speech.mark_producer_finished(req_id)
+
+            t1 = threading.Thread(target=_synth)
+            t2 = threading.Thread(target=_prod)
+
+            t1.start()
+            t2.start()
+
+            t1.join(timeout=1.0)
+            t2.join(timeout=1.0)
+
+            self.assertFalse(t1.is_alive(), f"Iteration {i}: synth thread deadlocked")
+            self.assertFalse(t2.is_alive(), f"Iteration {i}: producer thread deadlocked")
 
 
 if __name__ == "__main__":
