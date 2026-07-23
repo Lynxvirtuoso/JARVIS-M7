@@ -1,4 +1,4 @@
-"""
+﻿"""
 services/conversation/transcript_resolver.py
 Phase 1 Transcript Resolver for JARVIS M7.
 Handles wake-word position flexibility (start/middle/end), wake-word variant normalization,
@@ -40,7 +40,7 @@ PHONETIC_CORRECTIONS = [
         "Did you mean open VS Code or Chrome?"
     ),
     (
-        r"^surya\s+derm[uú]\s+pono\b",
+        r"^surya\s+derm[uÃº]\s+pono\b",
         "system status",
         False,
         "Did you mean system status?"
@@ -67,7 +67,8 @@ class TranscriptResolver:
                 raw_text="",
                 resolved_text="",
                 confidence=0.0,
-                wake_word_detected=False
+                wake_word_detected=False,
+                accepted_as_active_session_followup=False
             )
 
         text = raw_text.strip()
@@ -85,6 +86,7 @@ class TranscriptResolver:
                 confidence=1.0,
                 wake_word_detected=True,
                 wake_word_position=wake_pos,
+                accepted_as_active_session_followup=False,
                 needs_clarification=False
             )
 
@@ -110,6 +112,7 @@ class TranscriptResolver:
                 confidence=resolved_confidence,
                 wake_word_detected=wake_detected,
                 wake_word_position=wake_pos,
+                accepted_as_active_session_followup=not wake_detected,
                 needs_clarification=True,
                 clarification_question=clarification_question,
                 is_sensitive_action=is_sensitive,
@@ -158,6 +161,7 @@ class TranscriptResolver:
             confidence=final_confidence,
             wake_word_detected=wake_detected,
             wake_word_position=wake_pos,
+            accepted_as_active_session_followup=not wake_detected,
             needs_clarification=needs_clarification,
             clarification_question=clarification_question,
             is_sensitive_action=is_sensitive,

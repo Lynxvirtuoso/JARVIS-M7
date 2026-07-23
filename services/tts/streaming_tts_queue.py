@@ -1,4 +1,4 @@
-"""
+﻿"""
 services/tts/streaming_tts_queue.py
 Ordered queue manager for sentence-level streaming TTS synthesis and playback.
 Provides request-ID tracking, stale item filtering, backpressure, and immediate cancellation.
@@ -30,16 +30,19 @@ class StreamingTTSQueue:
         self._lock = threading.Lock()
         self._next_sequence = 0
 
-    def start_new_request(self) -> str:
+    def start_new_request(self, request_id: str | None = None) -> str:
         """
-        Generates a new unique request ID, invalidating previous request items and clearing pending queue items.
+        Starts a new request, invalidating any previous request items and clearing the queue.
+        If request_id is provided, reuses it (preserving original command ID through streaming).
+        If not, generates a new UUID.
         """
         with self._lock:
-            self._active_request_id = uuid.uuid4().hex
+            self._active_request_id = request_id if request_id else uuid.uuid4().hex
             self._next_sequence = 0
             self._clear_queue_unlocked()
             logger.info(f"[STREAMING TTS] Started new request ID: {self._active_request_id}")
             return self._active_request_id
+
 
     @property
     def active_request_id(self) -> str | None:
@@ -59,7 +62,8 @@ class StreamingTTSQueue:
             return False
 
         with self._lock:
-            if not self.is_request_active(request_id):
+            # Inline the active-request check (do NOT call is_request_active which re-acquires _lock)
+            if not (request_id and self._active_request_id == request_id):
                 logger.info(f"[STREAMING TTS] Rejected stale/cancelled sentence item for request {request_id}")
                 return False
             seq = self._next_sequence
@@ -80,6 +84,7 @@ class StreamingTTSQueue:
         except queue.Full:
             logger.warning(f"[STREAMING TTS] Queue full ({self.max_size}), dropping sentence: '{text[:30]}...'")
             return False
+
 
     def get_next_item(self, timeout: float = 1.0) -> TTSStreamItem | None:
         """

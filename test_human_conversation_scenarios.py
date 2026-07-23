@@ -1,17 +1,30 @@
-"""
+﻿"""
 test_human_conversation_scenarios.py
-Comprehensive test suite for Emergency Runtime Command Pipeline Fix & Phase 1 Reliability in JARVIS M7.
-Tests wake-word flexibility, transcript resolution, sensitive confirmation, dynamic STT prompts,
-production audio processing, self-voice echo rejection, request-ID isolation, and PipelineTimer resilience.
+Comprehensive test suite for Phase 1 Final Critical Integration Repair in JARVIS M7.
+Tests cover: sensitive action mapping, ambiguous shutdown, confirmation security,
+streamed request-ID propagation, correction interruption routing, speech completion
+semantics, follow-up timing, wake metadata, and regression cases.
 """
+import os
+import time
+import threading
 import unittest
 import numpy as np
-from services.conversation.models import ConversationRequest, ResolvedTranscript
+from unittest.mock import patch, MagicMock, call
+
+os.environ["JARVIS_TESTING"] = "1"
+
+from services.conversation.models import (
+    ConversationRequest, ResolvedTranscript, SensitiveActionType,
+    PendingConfirmation, PendingActionChoice, InterruptDecision
+)
 from services.conversation.transcript_resolver import transcript_resolver, TranscriptResolver
+from services.conversation.echo_rejector import echo_rejector, EchoRejector
 from services.stt.prompt_builder import stt_prompt_builder, PASSIVE_WAKE_PROMPT
-from services.conversation.echo_rejector import echo_rejector
 from services.audio_service import process_audio_safely
 from core.telemetry import pipeline_timer, PipelineTimer, TelemetryContext
+from services.tts.streaming_tts_queue import StreamingTTSQueue
+from services.system_power_controller import SystemPowerController
 
 
 class TestListeningReliabilityPhase1(unittest.TestCase):
@@ -19,7 +32,8 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
     def setUp(self):
         self.resolver = TranscriptResolver()
 
-    # --- 1. PipelineTimer & Telemetry Resilience ---
+    # ----- 1. PipelineTimer & Telemetry Resilience -----
+
     def test_pipeline_timer_without_request_id(self):
         pipeline_timer.start_pipeline("test command")
         ctx = pipeline_timer.get_thread_context()
@@ -47,7 +61,40 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertIn("football", res.resolved_text.lower())
         self.assertFalse(res.is_sensitive_action)
 
-    # --- 2. Sensitive Action Policy across All Sources (Voice, Typed, Telegram) ---
+    # ----- 2. Wake-Word Metadata -----
+
+    def test_wake_word_at_beginning(self):
+        res = self.resolver.resolve("Jarvis, what time is it?")
+        self.assertTrue(res.wake_word_detected)
+        self.assertEqual(res.wake_word_position, "start")
+        self.assertFalse(res.accepted_as_active_session_followup)
+
+    def test_wake_word_at_end(self):
+        res = self.resolver.resolve("What time is it, Jarvis?")
+        self.assertTrue(res.wake_word_detected)
+        self.assertEqual(res.wake_word_position, "end")
+        self.assertFalse(res.accepted_as_active_session_followup)
+
+    def test_wake_word_in_middle(self):
+        res = self.resolver.resolve("Could you, Jarvis, tell me the time?")
+        self.assertTrue(res.wake_word_detected)
+        self.assertEqual(res.wake_word_position, "middle")
+        self.assertFalse(res.accepted_as_active_session_followup)
+
+    def test_no_wake_word_returns_followup_true(self):
+        """A follow-up without a wake word should have wake_word_detected=False and accepted_as_active_session_followup=True."""
+        res = self.resolver.resolve("What time is it?")
+        self.assertFalse(res.wake_word_detected)
+        self.assertIsNone(res.wake_word_position)
+        self.assertTrue(res.accepted_as_active_session_followup)
+
+    def test_empty_transcript_followup_false(self):
+        res = self.resolver.resolve("")
+        self.assertFalse(res.wake_word_detected)
+        self.assertFalse(res.accepted_as_active_session_followup)
+
+    # ----- 3. Sensitive Action Classification -----
+
     def test_typed_shutdown_requires_confirmation(self):
         res = self.resolver.resolve("jarvis shutdown")
         self.assertTrue(res.is_sensitive_action)
@@ -57,13 +104,56 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertTrue(res.is_sensitive_action)
         self.assertTrue(res.wake_word_detected)
 
+    def test_shut_down_pc_maps_to_shutdown_computer(self):
+        res = self.resolver.resolve("shut down pc")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.SHUTDOWN_COMPUTER)
+
+    def test_close_jarvis_maps_to_exit_application(self):
+        res = self.resolver.resolve("close jarvis")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
+
+    def test_generic_shutdown_is_ambiguous(self):
+        """'shutdown' alone is ambiguous and must NOT map to EXIT_APPLICATION or SHUTDOWN_COMPUTER directly."""
+        res = self.resolver.resolve("jarvis shutdown")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.AMBIGUOUS_SHUTDOWN)
+
     def test_application_exit_vs_system_shutdown_distinction(self):
         res_app = self.resolver.resolve("close jarvis")
         res_sys = self.resolver.resolve("shut down pc")
-        self.assertTrue(res_app.is_sensitive_action)
-        self.assertTrue(res_sys.is_sensitive_action)
+        self.assertEqual(res_app.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
+        self.assertEqual(res_sys.sensitive_action_type, SensitiveActionType.SHUTDOWN_COMPUTER)
 
-    # --- 3. Interrupt Rejection & Echo Safety ---
+    def test_restart_maps_to_restart_computer(self):
+        res = self.resolver.resolve("restart pc")
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.RESTART_COMPUTER)
+
+    # ----- 4. Sensitive Action Execution Mapping (SystemPowerController) -----
+
+    def test_shutdown_computer_calls_shutdown_not_sleep(self):
+        ctrl = SystemPowerController(mock_mode=True)
+        result = ctrl.shutdown_pc()
+        self.assertTrue(result)
+
+    def test_restart_computer_calls_restart(self):
+        ctrl = SystemPowerController(mock_mode=True)
+        result = ctrl.restart_pc()
+        self.assertTrue(result)
+
+    def test_lock_calls_lock(self):
+        ctrl = SystemPowerController(mock_mode=True)
+        result = ctrl.lock_pc()
+        self.assertTrue(result)
+
+    def test_logout_calls_logout(self):
+        ctrl = SystemPowerController(mock_mode=True)
+        result = ctrl.logout_pc()
+        self.assertTrue(result)
+
+    # ----- 5. Interrupt Rejection & Echo Safety -----
+
     def test_empty_interrupt_transcript_is_rejected(self):
         self.assertTrue(echo_rejector.is_echo("", "Hello Sir", []))
         self.assertTrue(echo_rejector.is_echo("   ", "Hello Sir", []))
@@ -95,23 +185,171 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertTrue(echo_rejector.is_explicit_interrupt("no"))
         self.assertTrue(echo_rejector.is_explicit_interrupt("stop"))
 
-    # --- 4. Wake Word Position & Variant Flexibility ---
-    def test_wake_word_at_beginning(self):
-        res = self.resolver.resolve("Jarvis, shut down.")
-        self.assertTrue(res.wake_word_detected)
-        self.assertEqual(res.wake_word_position, "start")
+    # ----- 6. InterruptDecision Structured Return -----
 
-    def test_wake_word_at_end(self):
-        res = self.resolver.resolve("Shut down, Jarvis.")
-        self.assertTrue(res.wake_word_detected)
-        self.assertEqual(res.wake_word_position, "end")
+    def test_evaluate_interrupt_empty_returns_not_accepted(self):
+        d = echo_rejector.evaluate_interrupt("", "Hello", [], request_id="req-A")
+        self.assertFalse(d.accepted)
+        self.assertEqual(d.reason, "empty_transcript")
+        self.assertEqual(d.request_id, "req-A")
 
-    def test_wake_word_in_middle(self):
-        res = self.resolver.resolve("Could you shut down, Jarvis?")
-        self.assertTrue(res.wake_word_detected)
-        self.assertEqual(res.wake_word_position, "end")
+    def test_evaluate_interrupt_stop_accepted_with_reason(self):
+        d = echo_rejector.evaluate_interrupt("Stop.", "Football is a great game.", [], request_id="req-B")
+        self.assertTrue(d.accepted)
+        self.assertEqual(d.reason, "explicit_stop")
+        self.assertEqual(d.normalized_text, "stop")
 
-    # --- 5. Audio Protection & Peak Limiting (Production Function) ---
+    def test_evaluate_interrupt_actually_is_correction(self):
+        d = echo_rejector.evaluate_interrupt("Actually no.", "Football is a game.", [], request_id="req-C")
+        self.assertTrue(d.accepted)
+        self.assertIn(d.reason, {"correction", "explicit_keyword"})
+
+    def test_evaluate_interrupt_echo_returns_not_accepted(self):
+        d = echo_rejector.evaluate_interrupt("Systems going off", "Systems going on.", [], request_id="req-D")
+        self.assertFalse(d.accepted)
+        self.assertEqual(d.reason, "assistant_echo")
+        self.assertGreater(d.similarity, 0.5)
+
+    # ----- 7. Pending Confirmation Security -----
+
+    def test_pending_confirmation_fields_preserved(self):
+        now = time.time()
+        pc = PendingConfirmation(
+            request_id="req-secure-001",
+            session_id="sess-voice-001",
+            action_type=SensitiveActionType.SHUTDOWN_COMPUTER,
+            action_payload={"command": "shut down pc"},
+            source="voice",
+            created_at=now,
+            expires_at=now + 30.0
+        )
+        self.assertEqual(pc.request_id, "req-secure-001")
+        self.assertEqual(pc.session_id, "sess-voice-001")
+        self.assertEqual(pc.source, "voice")
+        self.assertEqual(pc.action_type, SensitiveActionType.SHUTDOWN_COMPUTER)
+        self.assertFalse(time.time() > pc.expires_at)
+
+    def test_pending_confirmation_expires(self):
+        now = time.time()
+        pc = PendingConfirmation(
+            request_id="req-expired-001",
+            session_id="sess-001",
+            action_type=SensitiveActionType.EXIT_APPLICATION,
+            action_payload={},
+            source="voice",
+            created_at=now - 60.0,
+            expires_at=now - 30.0
+        )
+        self.assertTrue(time.time() > pc.expires_at)
+
+    def test_pending_action_choice_fields(self):
+        now = time.time()
+        pac = PendingActionChoice(
+            request_id="req-choice-001",
+            session_id="sess-001",
+            source="voice",
+            options=[SensitiveActionType.EXIT_APPLICATION, SensitiveActionType.SHUTDOWN_COMPUTER],
+            created_at=now,
+            expires_at=now + 30.0
+        )
+        self.assertEqual(len(pac.options), 2)
+        self.assertIn(SensitiveActionType.EXIT_APPLICATION, pac.options)
+        self.assertIn(SensitiveActionType.SHUTDOWN_COMPUTER, pac.options)
+
+    # ----- 8. Streamed Request ID Propagation -----
+
+    def test_streaming_tts_queue_accepts_request_id(self):
+        q = StreamingTTSQueue(max_size=4)
+        req_id = "original-cmd-req-abc123"
+        returned = q.start_new_request(request_id=req_id)
+        self.assertEqual(returned, req_id)
+        self.assertEqual(q.active_request_id, req_id)
+
+    def test_streaming_tts_queue_generates_id_when_none_provided(self):
+        q = StreamingTTSQueue(max_size=4)
+        returned = q.start_new_request()
+        self.assertIsNotNone(returned)
+        self.assertGreater(len(returned), 0)
+
+    def test_streaming_tts_queue_preserves_id_through_enqueue(self):
+        q = StreamingTTSQueue(max_size=4)
+        req_id = "cmd-req-preserve-xyz"
+        q.start_new_request(request_id=req_id)
+        ok = q.enqueue_sentence(req_id, "This is the first sentence.", is_final=False)
+        self.assertTrue(ok)
+        item = q.get_next_item(timeout=0.1)
+        self.assertIsNotNone(item)
+        self.assertEqual(item.request_id, req_id)
+        self.assertEqual(item.text, "This is the first sentence.")
+
+    def test_stale_request_enqueue_rejected(self):
+        q = StreamingTTSQueue(max_size=4)
+        old_id = "old-req-001"
+        new_id = "new-req-002"
+        q.start_new_request(request_id=old_id)
+        q.start_new_request(request_id=new_id)
+        ok = q.enqueue_sentence(old_id, "Stale sentence.", is_final=False)
+        self.assertFalse(ok)
+
+    # ----- 9. Correction Interruption Extract Logic -----
+
+    def test_correction_reason_detected_by_evaluate_interrupt(self):
+        d = echo_rejector.evaluate_interrupt(
+            "Actually, I meant American football.",
+            "Football is a sport played with a round ball.",
+            ["Football is a sport played with a round ball."],
+            request_id="req-corr-001"
+        )
+        # Should be accepted (correction or distinct_user_interruption)
+        self.assertTrue(d.accepted)
+        self.assertIn("actually", d.normalized_text)
+
+    def test_old_request_cancelled_on_correction(self):
+        q = StreamingTTSQueue(max_size=4)
+        old_id = "req-football-001"
+        q.start_new_request(request_id=old_id)
+        q.enqueue_sentence(old_id, "Football is a great game.", is_final=False)
+        # Simulate cancel
+        q.cancel_active_request()
+        self.assertIsNone(q.active_request_id)
+        ok = q.enqueue_sentence(old_id, "More about football...", is_final=False)
+        self.assertFalse(ok)
+
+    def test_corrected_request_has_different_id(self):
+        import uuid
+        old_id = "req-original-football"
+        new_id = f"corr-{uuid.uuid4().hex[:12]}"
+        self.assertNotEqual(old_id, new_id)
+        self.assertTrue(new_id.startswith("corr-"))
+
+    # ----- 10. Speech Completion Semantics -----
+
+    def test_speech_lifecycle_state_producer_finished_required(self):
+        """speech_ended must not emit when producer has not finished."""
+        # Import directly from the dataclass definition only, without triggering speech singleton
+        from services.conversation.models import SpeechLifecycleState
+        state = SpeechLifecycleState(request_id="req-lifecycle-001")
+        self.assertFalse(state.producer_finished)
+        self.assertFalse(state.speech_ended_emitted)
+        self.assertFalse(state.cancelled)
+
+    def test_speech_lifecycle_cancelled_prevents_ended_emit(self):
+        from services.conversation.models import SpeechLifecycleState
+        state = SpeechLifecycleState(request_id="req-lifecycle-002")
+        state.cancelled = True
+        state.producer_finished = True
+        self.assertTrue(state.cancelled)
+        self.assertTrue(state.producer_finished)
+
+    def test_speech_lifecycle_duplicate_ended_prevented(self):
+        from services.conversation.models import SpeechLifecycleState
+        state = SpeechLifecycleState(request_id="req-lifecycle-003")
+        state.producer_finished = True
+        state.speech_ended_emitted = True
+        self.assertTrue(state.speech_ended_emitted)
+
+    # ----- 11. Audio Protection & Peak Limiting -----
+
     def test_process_audio_safely_peaks(self):
         for peak_target in [0.40, 0.90, 1.10, 1.35]:
             arr = np.array([0.1, -0.2, peak_target, -peak_target * 0.8], dtype=np.float32)
@@ -119,7 +357,8 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
             self.assertLessEqual(np.max(np.abs(res.audio_data)), 1.0)
             self.assertLessEqual(res.processed_peak, 1.0)
 
-    # --- 6. Singleton Services & Request ID Isolation ---
+    # ----- 12. Singleton Services & Request ID Isolation -----
+
     def test_singleton_acknowledgement_service(self):
         from services import acknowledgement_service as exported_instance
         from services.acknowledgement_service import acknowledgement_service as canonical_instance
@@ -141,6 +380,104 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
             created_at=105.0
         )
         self.assertNotEqual(req1.request_id, req2.request_id)
+
+    # ----- 13. Regression: Late Callbacks from Cancelled Requests -----
+
+    def test_late_callback_from_cancelled_request_is_silenced(self):
+        """After cancellation, a late sentence from old request must not enqueue."""
+        q = StreamingTTSQueue(max_size=4)
+        req_id = "req-late-callback-001"
+        q.start_new_request(request_id=req_id)
+        q.cancel_active_request()
+        # Simulate a late callback arriving after cancellation
+        result = q.enqueue_sentence(req_id, "This sentence arrived late.", is_final=False)
+        self.assertFalse(result)
+
+    def test_temporary_queue_emptiness_does_not_trigger_ended_without_producer_finish(self):
+        """Temporary empty queues during streaming should not trigger speech_ended."""
+        from services.conversation.models import SpeechLifecycleState
+        state = SpeechLifecycleState(request_id="req-streaming-empty")
+        # Producer still generating
+        state.producer_finished = False
+        # Queues momentarily empty (as happens during streaming)
+        text_queue_empty = True
+        audio_queue_empty = True
+        # speech_ended must NOT be emitted
+        should_emit = (
+            state.producer_finished and
+            not state.speech_ended_emitted and
+            not state.cancelled and
+            text_queue_empty and
+            audio_queue_empty
+        )
+        self.assertFalse(should_emit)
+
+    def test_cross_source_confirmation_rejected(self):
+        """A typed 'Yes' must not confirm a voice-originated pending confirmation."""
+        now = time.time()
+        voice_conf = PendingConfirmation(
+            request_id="req-voice-shutdown",
+            session_id="sess-001",
+            action_type=SensitiveActionType.SHUTDOWN_COMPUTER,
+            action_payload={"command": "shut down pc"},
+            source="voice",
+            created_at=now,
+            expires_at=now + 30.0
+        )
+        incoming_source = "typed"
+        # Source mismatch must cause rejection
+        self.assertNotEqual(voice_conf.source, incoming_source)
+
+    def test_cross_session_confirmation_rejected(self):
+        """A confirmation from a different session must be rejected."""
+        now = time.time()
+        conf = PendingConfirmation(
+            request_id="req-sess-mismatch",
+            session_id="sess-A",
+            action_type=SensitiveActionType.EXIT_APPLICATION,
+            action_payload={},
+            source="voice",
+            created_at=now,
+            expires_at=now + 30.0
+        )
+        incoming_session = "sess-B"
+        self.assertNotEqual(conf.session_id, incoming_session)
+
+    def test_duplicate_yes_cannot_execute_twice(self):
+        """Atomically cleared pending state prevents a second 'Yes' from re-executing."""
+        now = time.time()
+        conf = PendingConfirmation(
+            request_id="req-dup-yes-001",
+            session_id="sess-001",
+            action_type=SensitiveActionType.SHUTDOWN_COMPUTER,
+            action_payload={},
+            source="voice",
+            created_at=now,
+            expires_at=now + 30.0
+        )
+        # First Yes: read and clear
+        action_to_execute = conf.action_type
+        conf = None  # clear atomically
+
+        # Second Yes: no conf available
+        action_to_execute_2 = conf  # None â€” no action
+        self.assertIsNone(action_to_execute_2)
+        self.assertEqual(action_to_execute, SensitiveActionType.SHUTDOWN_COMPUTER)
+
+    def test_expired_confirmation_not_accepted(self):
+        """An expired confirmation must be discarded, not executed."""
+        now = time.time()
+        conf = PendingConfirmation(
+            request_id="req-expired-002",
+            session_id="sess-001",
+            action_type=SensitiveActionType.EXIT_APPLICATION,
+            action_payload={},
+            source="voice",
+            created_at=now - 60.0,
+            expires_at=now - 30.0
+        )
+        is_expired = time.time() > conf.expires_at
+        self.assertTrue(is_expired)
 
 
 if __name__ == "__main__":

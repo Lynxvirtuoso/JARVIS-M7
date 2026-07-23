@@ -1,4 +1,4 @@
-"""
+﻿"""
 services/conversation/models.py
 Data models and data structures for Phase 1 Listening Reliability & Conversational Intelligence.
 """
@@ -62,6 +62,16 @@ class PendingConfirmation:
     expires_at: float
 
 
+@dataclass
+class PendingActionChoice:
+    request_id: str
+    session_id: str
+    source: str
+    options: List[SensitiveActionType]
+    created_at: float
+    expires_at: float
+
+
 @dataclass(frozen=True)
 class InterruptDecision:
     accepted: bool
@@ -70,3 +80,14 @@ class InterruptDecision:
     similarity: float
     word_overlap: float
     request_id: str
+
+
+@dataclass
+class SpeechLifecycleState:
+    """Per-request speech lifecycle tracker. Imported here (not in speech_service)
+    to allow unit tests to instantiate it without triggering the SpeechEngine thread."""
+    request_id: str
+    producer_finished: bool = False
+    synthesis_active: bool = False
+    speech_ended_emitted: bool = False
+    cancelled: bool = False

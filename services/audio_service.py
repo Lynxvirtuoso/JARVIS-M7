@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import queue
 import time
@@ -123,7 +123,7 @@ except ImportError:
     WHISPER_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
-# Wake phrase matching — canonical forms and accent/STT variant lists
+# Wake phrase matching â€” canonical forms and accent/STT variant lists
 # ---------------------------------------------------------------------------
 
 # Canonical wake phrases JARVIS accepts as definitive matches
@@ -134,7 +134,7 @@ WAKE_PHRASES = [
     "hello jarvis",
 ]
 
-# All accent / STT mishear variants — treated as exact matches when found in text.
+# All accent / STT mishear variants â€” treated as exact matches when found in text.
 # Expanding for Indian-English common mishearings: jollis, javish, jarvish, jar wish
 FUZZY_VARIANTS = [
     # Single-word Jarvis variants
@@ -182,7 +182,7 @@ def is_wake_phrase(transcription: str) -> tuple[bool, str]:
         2. Exact variant / mishear substring
         3. Full-phrase SequenceMatcher fuzzy (threshold WAKE_FUZZY_THRESHOLD)
         4. Per-word fuzzy against 'jarvis' (threshold WAKE_WORD_FUZZY_THRESHOLD)
-           — reject words are skipped INSIDE this loop too.
+           â€” reject words are skipped INSIDE this loop too.
     """
     text = transcription.lower().strip()
     # Remove common punctuation
@@ -191,7 +191,7 @@ def is_wake_phrase(transcription: str) -> tuple[bool, str]:
     if not text or len(text) < 3:
         return False, ""
 
-    # Reject known false positives — checked BEFORE any fuzzy pass
+    # Reject known false positives â€” checked BEFORE any fuzzy pass
     all_words = text.split()
     word_set = set(all_words)
     if word_set.issubset(REJECT_WORDS):
@@ -217,7 +217,7 @@ def is_wake_phrase(transcription: str) -> tuple[bool, str]:
     # ---- Pass 3: SequenceMatcher fuzzy on full text vs each wake phrase ----
     # Ensure length/word constraint to prevent false wake triggers
     has_wake_context = any(w in all_words for w in ["wake", "hey", "hello", "hi", "up"])
-    
+
     for phrase in WAKE_PHRASES:
         ratio = SequenceMatcher(None, text, phrase).ratio()
         if ratio >= WAKE_FUZZY_THRESHOLD:
@@ -256,16 +256,16 @@ def is_wake_phrase(transcription: str) -> tuple[bool, str]:
 class AudioService(threading.Thread):
     """
     Core audio listener with strict state-gated processing.
-    
+
     Audio frames are processed differently depending on current engine state:
     - PASSIVE_WAKE_LISTENING: wake phrase detection + optional clap detection
     - ACTIVE_COMMAND_LISTENING: command recording with VAD
     - All other states: frames are ignored (only mic level sent to GUI)
-    
+
     Self-hearing prevention: frames are dropped while TTS is active or in cooldown.
     """
     _instance = None
-    
+
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
@@ -279,7 +279,7 @@ class AudioService(threading.Thread):
         self.chunk_size = 1024
         self.audio_queue = queue.Queue()
         self.session_recorder = SessionAudioRecorder()
-        
+
         # State tracking (mirrors engine state via event bus)
         self.current_state = "INITIALIZING"
         self.current_stream = None
@@ -287,41 +287,41 @@ class AudioService(threading.Thread):
         self.active_sample_rate = 16000
         self.is_suspended = False
         self.suspend_event = threading.Event()
-        
+
         # Ambient noise calibration
         self.ambient_rms = 0.01
         self.calibrated = False
         self.calibration_samples = []
-        
+
         # Command recording
         self.command_buffer = []
         self.command_has_speech = False
         self.silence_counter = 0
-        
+
         # Double clap detection
         self.clap_history = []   # list of (timestamp, rms) for spike analysis
         self.last_clap_wake_time = 0.0
-        
+
         # Voice wake phrase parameters
         self.wake_voice_buffer = []
         self.is_transcribing_wake = False
         self.is_collecting_wake = False
         self.wake_silence_counter = 0
-        
+
         # TTS Interruption parameters (entirely separate from wake/command)
         self.interrupt_voice_buffer = []
         self.interrupt_pre_roll_buffer = []
         self.is_collecting_interrupt = False
         self.interrupt_silence_counter = 0
         self.is_transcribing_interrupt = False
-        
+
         self.pre_roll_buffer = []
         self.last_raw_rms = 0.0
         self.last_avg_rms = 0.0
         self.last_peak_val = 0.0
         self.last_duration = 0.0
         self.last_diagnostics_warning = None
-        
+
         # Connect to event bus
         bus.state_changed.connect(self.on_state_changed)
 
@@ -332,12 +332,12 @@ class AudioService(threading.Thread):
         base = float(config.get("command_sensitivity", "0.015"))
         # At least 3.5x ambient noise, but not less than base
         return max(base, self.ambient_rms * 3.5)
-    
+
     @property
     def wake_trigger_threshold(self):
         # At least 4.0x ambient noise, but not less than base sensitivity
         return max(self.ambient_rms * 4.0, float(config.get("wake_sensitivity", "0.03")))
-    
+
     @property
     def wake_word_enabled(self):
         return config.get("wake_word_enabled", "true").lower() == "true"
@@ -345,20 +345,20 @@ class AudioService(threading.Thread):
     @property
     def clap_enabled(self):
         return config.get("clap_wake_enabled", "false").lower() == "true"
-    
+
     @property
     def silence_timeout_chunks(self):
         """Number of consecutive silent chunks before ending command recording (~1s)."""
         ms = int(config.get("silence_timeout_ms", "1000"))
         chunk_duration_ms = (self.chunk_size / self.sample_rate) * 1000
         return max(8, int(ms / chunk_duration_ms))
-    
+
     @property
     def min_command_chunks(self):
         """Minimum number of chunks for a valid command."""
         min_sec = float(config.get("minimum_command_duration_seconds", "0.8"))
         return max(4, int(min_sec * self.sample_rate / self.chunk_size))
-    
+
     @property
     def max_command_chunks(self):
         """Maximum command recording duration."""
@@ -381,7 +381,7 @@ class AudioService(threading.Thread):
             self.is_collecting_wake = False
             self.wake_voice_buffer = []
             logger.info(f"Command listening active ({state}). Waiting for user command.")
-            
+
             # Start continuous debug recording session if not already started
             if self.session_recorder.wav_file is None:
                 self.session_recorder.start_session()
@@ -396,13 +396,13 @@ class AudioService(threading.Thread):
     def audio_callback(self, indata, frames, time_info, status):
         if status:
             logger.debug(f"Audio stream status: {status}")
-            
+
         # Apply input gain boost if set in dB
         gain_db = float(config.get("input_gain_boost_db", "0"))
         if gain_db != 0:
             gain_factor = 10 ** (gain_db / 20.0)
             indata = indata * gain_factor
-            
+
         # Real-time resampling if native rate differs from 16000Hz
         if self.active_sample_rate != self.sample_rate:
             xp = np.linspace(0, 1, len(indata))
@@ -413,10 +413,10 @@ class AudioService(threading.Thread):
             self.audio_queue.put(indata.copy())
 
     def select_best_microphone(self):
-        """Intelligent Microphone Selection — see previous implementation."""
+        """Intelligent Microphone Selection â€” see previous implementation."""
         devices = sd.query_devices()
         hostapis = sd.query_hostapis()
-        
+
         input_devices = []
         for idx, dev in enumerate(devices):
             if dev.get("max_input_channels", 0) > 0:
@@ -427,7 +427,7 @@ class AudioService(threading.Thread):
                 })
         if not input_devices:
             raise RuntimeError("No input audio recording devices found on this system.")
-        
+
         # Priority 1: User-configured device by index first, then name/backend
         saved_index = config.get("selected_microphone_index")
         if saved_index is not None:
@@ -446,7 +446,7 @@ class AudioService(threading.Thread):
                 if dev["name"] == saved_name and dev["backend"] == saved_backend:
                     return dev["index"], dev["name"], dev["backend"]
             logger.warn(f"Configured mic '{saved_name}' ({saved_backend}) not found. Auto-selecting.")
-        
+
         # Priority 2: Windows default (if not virtual)
         try:
             default_idx = sd.default.device[0]
@@ -460,7 +460,7 @@ class AudioService(threading.Thread):
                     return default_idx, name, backend
         except Exception:
             pass
-        
+
         # Priority 3: Score-based selection
         virtuals = ["wo mic", "audiorelay", "virtual mic", "stereo mix", "loopback", "steam", "nvidia",
                     "sound mapper", "microsoft sound mapper"]
@@ -482,7 +482,7 @@ class AudioService(threading.Thread):
     def run(self):
         logger.info("Always-listening microphone thread initialized.")
         self.stream_active = True
-        
+
         while self.stream_active:
             if self.is_suspended:
                 self.suspend_event.wait(timeout=0.5)
@@ -491,11 +491,11 @@ class AudioService(threading.Thread):
             try:
                 device_idx, device_name, backend_name = self.select_best_microphone()
                 device_info = sd.query_devices(device_idx)
-                
+
                 self.active_sample_rate = self.sample_rate
                 stream_rate = self.sample_rate
                 default_rate = int(device_info.get("default_samplerate", 16000))
-                
+
                 try:
                     self.current_stream = sd.InputStream(
                         samplerate=self.sample_rate, channels=1,
@@ -512,7 +512,7 @@ class AudioService(threading.Thread):
                         callback=self.audio_callback, blocksize=stream_blocksize,
                         dtype='float32', device=device_idx
                     )
-                
+
                 logger.info(
                     f"\nSelected microphone:\n{device_name}\n\n"
                     f"Index: {device_idx}\n\nBackend: {backend_name}\n\n"
@@ -520,7 +520,7 @@ class AudioService(threading.Thread):
                 )
                 bus.console_log.emit("INFO", f"Active Mic: {device_name}")
                 bus.system_stats_updated.emit({"active_mic": device_name})
-                
+
                 with self.current_stream:
                     logger.info("Listening...")
                     # Ambient noise calibration (2 seconds) - skip if already calibrated to preserve noise floor
@@ -528,7 +528,7 @@ class AudioService(threading.Thread):
                         self._calibrate_ambient()
                     else:
                         logger.info("Resuming listening without recalibrating ambient noise floor.")
-                    
+
                     while self.current_stream is not None:
                         try:
                             chunk = self.audio_queue.get(timeout=0.1)
@@ -563,7 +563,7 @@ class AudioService(threading.Thread):
     def restart_stream(self):
         """Close current stream; the run() loop will re-open with updated config."""
         logger.info("Re-initializing microphone device stream...")
-        
+
         if self.current_stream:
             try:
                 stream = self.current_stream
@@ -602,14 +602,14 @@ class AudioService(threading.Thread):
     # -- Core audio processing -----------------------------------------------
     def process_audio_chunk(self, chunk):
         rms = np.sqrt(np.mean(chunk**2))
-        
+
         # Always send mic level to GUI
         bus.system_stats_updated.emit({"mic_level": float(rms)})
 
         # [TEMPORARY DEBUG] Record session chunk continuously during active session
         if hasattr(self, "session_recorder") and self.session_recorder.wav_file is not None:
             self.session_recorder.write_chunk(chunk)
-        
+
         # ---- Self-hearing prevention & TTS interrupt detection ----
         from services.speech_service import speech
         if speech.is_speaking:
@@ -618,7 +618,7 @@ class AudioService(threading.Thread):
             return  # Drop frame silently for normal logic
         elif speech.tts_cooldown_active:
             return  # Drop frame silently
-        
+
         state = self.current_state
 
         # ===== States where mic frames are actively processed =====
@@ -653,7 +653,7 @@ class AudioService(threading.Thread):
                     except Exception:
                         dev_info = f" (Device Index: {self.current_stream.device})"
                 logger.info(f"Command voice detected. RMS: {rms:.4f}{dev_info}")
-                # Notify engine — it will transition ACTIVE_COMMAND_LISTENING → COMMAND_RECORDING
+                # Notify engine â€” it will transition ACTIVE_COMMAND_LISTENING â†’ COMMAND_RECORDING
                 # and cancel the command-listening timeout.
                 bus.command_recording_started.emit()
                 # Prepend the pre-roll chunks to self.command_buffer
@@ -670,7 +670,7 @@ class AudioService(threading.Thread):
 
         # Periodic diagnostic (debug mode only)
         if len(self.command_buffer) % 20 == 0:
-            logger.debug(f"Command recording — Chunks: {len(self.command_buffer)}, "
+            logger.debug(f"Command recording â€” Chunks: {len(self.command_buffer)}, "
                          f"RMS: {rms:.4f}, Speech detected: {self.command_has_speech}, "
                          f"Silence counter: {self.silence_counter}/{self.silence_timeout_chunks}")
 
@@ -705,11 +705,11 @@ class AudioService(threading.Thread):
 
     def _process_passive_wake(self, chunk, rms):
         """Handle wake phrase detection and optional clap detection."""
-        
+
         # A. Double Clap Detection (only if enabled)
         if self.clap_enabled:
             self._check_clap(rms)
-        
+
         # B. Voice Wake Phrase Detection
         if self.wake_word_enabled and rms > self.wake_trigger_threshold and not self.is_transcribing_wake:
             if not self.is_collecting_wake:
@@ -717,18 +717,18 @@ class AudioService(threading.Thread):
                 self.wake_voice_buffer = []
                 self.wake_silence_counter = 0
                 logger.info(f"Voice activity detected in passive mode. RMS: {rms:.4f}")
-            
+
         if self.wake_word_enabled and self.is_collecting_wake:
             self.wake_voice_buffer.append(chunk)
-            
+
             if rms < self.wake_trigger_threshold:
                 self.wake_silence_counter += 1
             else:
                 self.wake_silence_counter = 0
-            
+
             wake_silence_limit = 15  # ~1.0s of silence
             wake_max_chunks = 50     # ~3.2s max
-            
+
             if self.wake_silence_counter >= wake_silence_limit or len(self.wake_voice_buffer) >= wake_max_chunks:
                 self.is_collecting_wake = False
                 if len(self.wake_voice_buffer) > 8:
@@ -741,33 +741,33 @@ class AudioService(threading.Thread):
     def _check_clap(self, rms):
         """
         Improved double-clap detection.
-        Requires two sharp spikes (≥4× ambient RMS) within 200-700ms with silence between.
+        Requires two sharp spikes (â‰¥4Ã— ambient RMS) within 200-700ms with silence between.
         """
         now = time.time()
         clap_min_rms = max(0.25, self.ambient_rms * 4.0)
-        
+
         # Cooldown after last successful clap wake
         if now - self.last_clap_wake_time < 8.0:
             return
-        
+
         if rms > clap_min_rms:
             self.clap_history.append((now, rms))
-        
+
         # Keep only recent entries (last 2 seconds)
         self.clap_history = [(t, r) for t, r in self.clap_history if now - t < 2.0]
-        
+
         if len(self.clap_history) >= 2:
             t1, r1 = self.clap_history[-2]
             t2, r2 = self.clap_history[-1]
             dt = t2 - t1
-            
+
             if 0.15 < dt < 0.70:
-                logger.info(f"Double clap detected! Δt={dt:.2f}s, peaks=({r1:.3f}, {r2:.3f}), ambient={self.ambient_rms:.4f}")
+                logger.info(f"Double clap detected! Î”t={dt:.2f}s, peaks=({r1:.3f}, {r2:.3f}), ambient={self.ambient_rms:.4f}")
                 self.clap_history = []
                 self.last_clap_wake_time = now
                 bus.wake_detected.emit("clap")
             elif dt >= 0.70:
-                # Too slow — clear the oldest
+                # Too slow â€” clear the oldest
                 self.clap_history = self.clap_history[-1:]
 
     # -- Wake phrase check ---------------------------------------------------
@@ -780,7 +780,7 @@ class AudioService(threading.Thread):
             return
         # Extra state guard
         if self.current_state != "PASSIVE_WAKE_LISTENING":
-            logger.debug(f"Wake transcription skipped — state is {self.current_state}")
+            logger.debug(f"Wake transcription skipped â€” state is {self.current_state}")
             return
         try:
             self.is_transcribing_wake = True
@@ -792,7 +792,7 @@ class AudioService(threading.Thread):
 
             segments, info = model.transcribe(
                 audio_data,
-                beam_size=1,          # Fastest possible — wake doesn't need accuracy
+                beam_size=1,          # Fastest possible â€” wake doesn't need accuracy
                 language="en",
                 temperature=0,
                 condition_on_previous_text=False,
@@ -837,7 +837,7 @@ class AudioService(threading.Thread):
     def _transcribe_command(self, buffer):
         """
         Run STT on the recorded command buffer.
-        Emits semantic bus signals only — never touches bus.state_changed directly.
+        Emits semantic bus signals only â€” never touches bus.state_changed directly.
         All engine state transitions happen on the main Qt thread via those signals.
         """
         if not buffer:
@@ -930,7 +930,7 @@ class AudioService(threading.Thread):
             )
             stt_latency = time.monotonic() - stt_start_time
             bus.system_stats_updated.emit({"stt_latency": round(stt_latency, 2)})
-            
+
             raw_text = stt_result.text
             from services.phonetic_correction_service import phonetic_correction_service
             transcription = phonetic_correction_service.correct_transcription(raw_text)
@@ -957,7 +957,7 @@ class AudioService(threading.Thread):
                                 cursor = conn.cursor()
                                 cursor.execute("SELECT COALESCE(display_override, name) FROM contacts")
                                 all_contact_names = [row[0] for row in cursor.fetchall() if row[0]]
-                            
+
                             # Find top 15 phonetically-plausible candidates using difflib.SequenceMatcher
                             candidates = []
                             target_clean = target.lower().strip()
@@ -974,7 +974,7 @@ class AudioService(threading.Thread):
                                 candidates.append((c_name, max_ratio))
                             candidates.sort(key=lambda x: x[1], reverse=True)
                             top_names = [c[0] for c in candidates[:15]]
-                            
+
                             # Build targeted second-pass prompt
                             second_biasing_names = []
                             for name in top_names:
@@ -983,7 +983,7 @@ class AudioService(threading.Thread):
                                     cleaned = re.sub(r"[^\w]", "", w).strip()
                                     if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
                                         second_biasing_names.append(cleaned)
-                                        
+
                             second_prompt = (
                                 "Jarvis desktop assistant command. "
                                 "Common: open Chrome, open Notepad, open VS Code, exit app, screenshot, play/stop music, lock computer. "
@@ -991,7 +991,7 @@ class AudioService(threading.Thread):
                             )
                             if second_biasing_names:
                                 second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
-                            
+
                             logger.info(f"Second-pass STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
                                 wav_bytes,
@@ -1045,7 +1045,7 @@ class AudioService(threading.Thread):
                                 candidates.append((ascii_name, max_ratio))
                             candidates.sort(key=lambda x: x[1], reverse=True)
                             top_names = [c[0] for c in candidates[:15]]
-                            
+
                             second_biasing_names = []
                             for name in top_names:
                                 words = re.split(r"[\s\-_&]+", name)
@@ -1053,14 +1053,14 @@ class AudioService(threading.Thread):
                                     cleaned = re.sub(r"[^\w]", "", w).strip()
                                     if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
                                         second_biasing_names.append(cleaned)
-                                        
+
                             second_prompt = (
                                 "Music Space raga database search. "
                                 "Transcribe music and raga terms clearly: arohana, avarohana, melakarta, scale, tradition."
                             )
                             if second_biasing_names:
                                 second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
-                            
+
                             logger.info(f"Second-pass Raga STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
                                 wav_bytes,
@@ -1125,25 +1125,25 @@ class AudioService(threading.Thread):
                 logger.info(f"Voice activity detected during TTS. RMS: {rms:.4f}")
         else:
             self.interrupt_voice_buffer.append(chunk)
-            
+
             if rms < self.wake_trigger_threshold:
                 self.interrupt_silence_counter += 1
             else:
                 self.interrupt_silence_counter = 0
-            
+
             # ~1.0s of silence to mark end of utterance (15 chunks)
             if self.interrupt_silence_counter >= 15:
                 self.is_collecting_interrupt = False
                 buffer_copy = list(self.interrupt_voice_buffer)
                 self.interrupt_voice_buffer = []
-                
+
                 # Check minimum duration to prevent clicks/spikes from transcribing (approx 0.6s)
                 if len(buffer_copy) >= 4:
                     self.is_transcribing_interrupt = True
                     utterance_end_time = time.time()
                     threading.Thread(
-                        target=self._transcribe_interrupt, 
-                        args=(buffer_copy, utterance_end_time), 
+                        target=self._transcribe_interrupt,
+                        args=(buffer_copy, utterance_end_time),
                         daemon=True
                     ).start()
                 else:
@@ -1155,12 +1155,12 @@ class AudioService(threading.Thread):
             import soundfile as sf
             import numpy as np
             from services.stt.wake_model_manager import wake_model_manager
-            
+
             audio_data = np.concatenate(buffer).flatten()
             model = wake_model_manager.get_model()
-            
+
             audio_data = audio_data.astype(np.float32)
-            
+
             logger.info("Transcribing interrupt audio buffer...")
             segments, info = model.transcribe(
                 audio_data,
@@ -1172,33 +1172,72 @@ class AudioService(threading.Thread):
             )
             transcription = " ".join([s.text for s in segments]).strip()
             logger.info(f"Interrupt listener transcription: {transcription!r}")
-            
+
             from services.speech_service import speech
             from services.conversation.echo_rejector import echo_rejector
             from services.tts.streaming_tts_queue import streaming_tts_queue
-            
-            req_id = getattr(streaming_tts_queue, "active_request_id", None)
+
+            active_req_id = getattr(streaming_tts_queue, "active_request_id", None)
             curr_sentence = getattr(speech, "current_spoken_sentence", "")
             recent_sentences = getattr(speech, "recent_spoken_sentences", [])
 
-            is_echo_talk = echo_rejector.is_echo(
-                transcription,
-                curr_sentence,
-                recent_sentences,
-                request_id=req_id
+            # Use structured InterruptDecision instead of raw boolean
+            decision = echo_rejector.evaluate_interrupt(
+                transcript=transcription,
+                current_spoken_sentence=curr_sentence,
+                recent_spoken_sentences=recent_sentences,
+                request_id=active_req_id
             )
 
-            if is_echo_talk:
-                logger.info(f"Self-hearing echo discarded for transcript: '{transcription[:30]}...'")
+            if not decision.accepted:
+                logger.info(f"Self-hearing echo/noise discarded | Reason: {decision.reason} | Transcript: '{transcription[:30]}'")
                 return
 
             from services.tts.provider_manager import tts_manager
             tts_manager.stop_speaking()
-            
+
             latency = time.time() - utterance_end_time
-            logger.info(f"INTERRUPT LATENCY: {latency:.4f} seconds from end of utterance to playback halt.")
-            
-            bus.speech_interrupted.emit()
+            logger.info(f"INTERRUPT LATENCY: {latency:.4f} seconds | Reason: {decision.reason} | Req ID: {active_req_id}")
+
+            if decision.reason == "correction":
+                # Extract the corrected command by removing "actually" and "I meant" prefixes
+                import re as _re
+                corrected = _re.sub(
+                    r"(?i)^(?:actually[,\s]*)?(?:i meant[,\s]*)?(?:no[,\s]+)?(?:tell me about[,\s]*)?",
+                    "",
+                    decision.normalized_text
+                ).strip()
+                if not corrected:
+                    corrected = decision.normalized_text
+
+                # If we can frame it contextually, do so
+                if corrected and curr_sentence and any(w in curr_sentence.lower() for w in ["football", "soccer", "sport"]):
+                    corrected = f"tell me about {corrected}" if not corrected.startswith("tell") else corrected
+
+                logger.info(f"Correction interruption: old req={active_req_id} | Corrected query: '{corrected}'")
+
+                # Cancel old request before routing corrected request
+                if active_req_id:
+                    speech.cancel_request(active_req_id)
+                    streaming_tts_queue.cancel_active_request()
+
+                # Create new ConversationRequest with new request_id
+                import uuid, time as _t
+                from services.conversation.models import ConversationRequest
+                new_req_id = f"corr-{uuid.uuid4().hex[:12]}"
+                new_req = ConversationRequest(
+                    request_id=new_req_id,
+                    session_id="default_session",
+                    raw_transcript=transcription,
+                    cleaned_transcript=corrected,
+                    created_at=_t.time(),
+                    source="voice_correction"
+                )
+                logger.info(f"Routing correction as new request ID: {new_req_id} | Command: '{corrected}'")
+                bus.command_transcription_completed.emit(new_req)
+            else:
+                # Normal stop/cancel interruption
+                bus.speech_interrupted.emit()
         except Exception as e:
             logger.error(f"Error in _transcribe_interrupt: {e}", exc_info=True)
         finally:
