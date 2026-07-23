@@ -221,12 +221,18 @@ class CoreOutputLogPanel(HUDCollapsiblePanel):
         bus.command_transcription_completed.connect(self._on_new_command)
 
     # ── Stream handlers ───────────────────────────────
-    def _on_new_command(self, user_text: str):
+    def _on_new_command(self, payload):
         """New command transcribed — add user turn, clear the output area."""
+        if not payload:
+            return
+        if hasattr(payload, "cleaned_transcript"):
+            user_text = payload.cleaned_transcript or payload.raw_transcript
+        else:
+            user_text = str(payload)
         self._output.clear()
         self._current_stream_text = ""
         self._is_streaming = True
-        if user_text.strip():
+        if user_text and user_text.strip():
             self.add_log_line("YOU", user_text.strip(), is_user=True)
 
     def _on_stream_token(self, token: str):

@@ -34,6 +34,8 @@ class KokoroProvider(TTSProvider):
             logger.error(f"Error during background TTS warmup: {e}")
 
     def pre_cache_phrases(self) -> None:
+        if os.getenv("JARVIS_TESTING") == "1":
+            return
         static_phrases = [
             "Yes, Sir.",
             "Going passive, Sir.",

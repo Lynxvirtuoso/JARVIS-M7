@@ -14,6 +14,9 @@ class ConversationRequest:
     cleaned_transcript: str
     created_at: float
     audio_quality: float = 1.0
+    original_audio_peak: float = 0.0
+    processed_audio_peak: float = 0.0
+    clipping_detected: bool = False
     stt_confidence: Optional[float] = None
     stt_provider: str = "groq_stt"
 

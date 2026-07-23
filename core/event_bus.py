@@ -25,7 +25,7 @@ class EventBus(QObject):
     command_recording_started      = pyqtSignal()       # user voice detected in ACTIVE_COMMAND_LISTENING
     command_recording_stopped      = pyqtSignal()       # silence ended recording (before transcription)
     command_transcription_started  = pyqtSignal()       # STT pipeline is about to run
-    command_transcription_completed = pyqtSignal(str)   # transcription succeeded; payload = text
+    command_transcription_completed = pyqtSignal(object)  # transcription succeeded; payload = ConversationRequest or str
     command_transcription_failed   = pyqtSignal(str)    # transcription failed or empty; payload = reason
 
     # Command execution events

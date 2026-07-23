@@ -1,4 +1,6 @@
-from services.acknowledgement_service import AcknowledgementService
+from services.acknowledgement_service import (
+    AcknowledgementService,
+    acknowledgement_service,
+)
 
-# Global acknowledgement service instance
-acknowledgement_service = AcknowledgementService()
+__all__ = ["AcknowledgementService", "acknowledgement_service"]

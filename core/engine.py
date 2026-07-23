@@ -1003,14 +1003,32 @@ class JarvisEngine(QObject):
         if self.state in ("SESSION_LISTENING", "ACTIVE_COMMAND_LISTENING", "COMMAND_RECORDING"):
             self.transition_to("TRANSCRIBING_COMMAND")
 
-    @pyqtSlot(str)
-    def on_command_transcription_completed(self, text):
+    @pyqtSlot(object)
+    def on_command_transcription_completed(self, payload):
         """STT succeeded — emit measured STT latency to HUD telemetry panel."""
         if self.state == "TRANSCRIBING_COMMAND":
             try:
+                from services.conversation.models import ConversationRequest
+                if isinstance(payload, ConversationRequest):
+                    req = payload
+                    raw_text = req.cleaned_transcript or req.raw_transcript
+                else:
+                    raw_text = str(payload)
+                    import uuid
+                    import time
+                    req = ConversationRequest(
+                        request_id=uuid.uuid4().hex,
+                        session_id="default_session",
+                        raw_transcript=raw_text,
+                        cleaned_transcript=raw_text,
+                        created_at=time.time(),
+                        stt_confidence=0.90,
+                        stt_provider="voice"
+                    )
+
                 from core.telemetry import pipeline_timer
-                pipeline_timer.start_pipeline(text)
-                self._process_received_command(text, source="voice")
+                pipeline_timer.start_pipeline(raw_text, request_id=req.request_id)
+                self._process_received_command(req, source="voice")
             except Exception as e:
                 logger.exception(f"Command processing crashed: {e}")
                 self.transition_to("SPEAKING_RESPONSE")
@@ -1148,218 +1166,42 @@ class JarvisEngine(QObject):
         from services.intent.provider_manager import intent_manager
         intent_manager.clear_cache()
 
+        from services.conversation.models import ConversationRequest
+        if isinstance(raw_command, ConversationRequest):
+            req = raw_command
+            request_id = req.request_id
+            raw_text = req.cleaned_transcript or req.raw_transcript
+            audio_quality = req.audio_quality
+            stt_confidence = req.stt_confidence
+        else:
+            raw_text = str(raw_command)
+            import uuid
+            import time
+            request_id = uuid.uuid4().hex
+            audio_quality = 1.0
+            stt_confidence = 0.90
+            req = ConversationRequest(
+                request_id=request_id,
+                session_id="default_session",
+                raw_transcript=raw_text,
+                cleaned_transcript=raw_text,
+                created_at=time.time(),
+                audio_quality=audio_quality,
+                stt_confidence=stt_confidence,
+                stt_provider=source
+            )
+
         self.last_command_source = source
+        self.active_request_id = request_id
         self.wake_timer.stop()
         salutation = config.salutation
 
-        # Check if we are waiting for an ambiguous raga resolution index
-        if hasattr(self, "pending_raga_candidates") and self.pending_raga_candidates:
-            choice_idx = None
-            normalized_ans = raw_command.lower().strip()
-            digit_match = re.search(r"\b(\d+)\b", normalized_ans)
-            if digit_match:
-                choice_idx = int(digit_match.group(1)) - 1
-            else:
-                word_to_num = {
-                    "first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4,
-                    "one": 0, "two": 1, "three": 2, "four": 3, "five": 4,
-                    "last": len(self.pending_raga_candidates) - 1
-                }
-                for word, idx in word_to_num.items():
-                    if f"\b{word}\b" in normalized_ans or normalized_ans == word:
-                        choice_idx = idx
-                        break
-            if choice_idx is not None and 0 <= choice_idx < len(self.pending_raga_candidates):
-                raga = self.pending_raga_candidates[choice_idx]
-                aspect = getattr(self, "pending_command_aspect", "all")
-                self.pending_raga_candidates = None
-                self.pending_command_aspect = None
-                name = raga["name"]
-                aroh = ", ".join(raga["arohana"])
-                avah = ", ".join(raga["avarohana"])
-                cat = raga["category"]
-                if aspect == "arohana":
-                    reply = f"The arohana of raga {name} is: {aroh}, {salutation}."
-                elif aspect == "avarohana":
-                    reply = f"The avarohana of raga {name} is: {avah}, {salutation}."
-                elif aspect == "scale":
-                    reply = f"Raga {name} has Arohana: {aroh}. Avarohana: {avah}, {salutation}."
-                else:
-                    parent_info = ""
-                    if raga.get("parent_id"):
-                        with db.get_connection() as conn:
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT name FROM ragas WHERE id = ?", (raga["parent_id"],))
-                            p_row = cursor.fetchone()
-                            if p_row:
-                                parent_info = f" derived from parent {p_row[0]}"
-                    reply = f"Raga {name} is a {cat}{parent_info} of the {raga['tradition']} tradition. Arohana: {aroh}. Avarohana: {avah}, {salutation}."
-                self.transition_to("SPEAKING_RESPONSE")
-                speech.speak(reply)
-                self._schedule_return_to_session_after_speech()
-                return
-            else:
-                no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "/cancel"]
-                if any(bool(re.search(rf"\b{re.escape(ans)}\b", normalized_ans)) for ans in no_indicators):
-                    self.pending_raga_candidates = None
-                    self.pending_command_aspect = None
-                    self.transition_to("SPEAKING_RESPONSE")
-                    speech.speak(f"Raga lookup cancelled, {salutation}.")
-                    self._schedule_return_to_session_after_speech()
-                    return
-                self.pending_raga_candidates = None
-                self.pending_command_aspect = None
-
-        # Check if we are waiting for an ambiguous call contact resolution index
-        if hasattr(self, "pending_call_candidates") and self.pending_call_candidates:
-            choice_idx = None
-            normalized_ans = raw_command.lower().strip()
-            
-            # Match digits
-            digit_match = re.search(r"\b(\d+)\b", normalized_ans)
-            if digit_match:
-                choice_idx = int(digit_match.group(1)) - 1
-            else:
-                # Match common words
-                word_to_num = {
-                    "first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4,
-                    "one": 0, "two": 1, "three": 2, "four": 3, "five": 4,
-                    "last": len(self.pending_call_candidates) - 1
-                }
-                for word, idx in word_to_num.items():
-                    if f"\b{word}\b" in normalized_ans or normalized_ans == word:
-                        choice_idx = idx
-                        break
-
-            if choice_idx is not None and 0 <= choice_idx < len(self.pending_call_candidates):
-                contact = self.pending_call_candidates[choice_idx]
-                name = contact["name"]
-                number = contact["phone"]
-                
-                # Clear ambiguous candidates and confirmation states
-                self.pending_call_candidates = None
-                self.pending_command = None
-                self.pending_command_type = None
-                
-                # Proceed to call confirmation (evaluating TrustGate)
-                target_cmd = f"place_call_confirmed:{number}:{name}"
-                tool_call = ToolCall(
-                    tool_name="call_skill",
-                    action="place_call",
-                    target=f"{name} ({number})",
-                    source=source,
-                    confidence=1.0,
-                    audio_quality=1.0,
-                    reversible=False,
-                    destructive=True
-                )
-                decision = TrustGate.evaluate(tool_call)
-                if decision == "CONFIRM":
-                    self.pending_command = target_cmd
-                    self.pending_command_type = "place_call"
-                    self.misheard_command = raw_command
-                    self.transition_to("WAITING_FOR_CONFIRMATION")
-                    
-                    confirm_phrase = f"Do you want me to call {name} at {number}, {salutation}?"
-                    speech.speak(confirm_phrase)
-                    
-                    if source == "telegram":
-                        import time
-                        self.pending_telegram_confirm = {
-                            "command": target_cmd,
-                            "timestamp": time.time(),
-                            "chat_id": self.last_telegram_chat_id,
-                            "message_id": None
-                        }
-                        self.pending_command = None
-                        self.pending_command_type = None
-                        msg_id = self.telegram_bot.send_confirmation_keyboard(
-                            self.last_telegram_chat_id, 
-                            confirm_phrase
-                        )
-                        self.pending_telegram_confirm["message_id"] = msg_id
-                        if self.in_session:
-                            self.transition_to("SESSION_LISTENING")
-                        else:
-                            self._return_to_passive()
-                return
-            else:
-                # If they say "no" or "cancel", clear state and cancel call
-                no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "/cancel"]
-                if any(bool(re.search(rf"\b{re.escape(ans)}\b", normalized_ans)) for ans in no_indicators):
-                    self.pending_call_candidates = None
-                    self.pending_command = None
-                    self.pending_command_type = None
-                    self.transition_to("SPEAKING_RESPONSE")
-                    speech.speak(f"Call cancelled, {salutation}.")
-                    self._schedule_return_to_session_after_speech()
-                    return
-                
-                # Otherwise, clear candidate resolution state and fall through to treat as a fresh command
-                self.pending_call_candidates = None
-                self.pending_command = None
-                self.pending_command_type = None
-
-        raw_command, rep_count = collapse_repeated_command(raw_command)
-        is_low_confidence = (rep_count >= 3)
-
-        # Handle screenshot requests
-        cmd_norm = raw_command.lower().strip()
-        screenshot_keywords = {
-            "send me a screenshot of the hud",
-            "take a screenshot of the hud",
-            "screenshot of the hud",
-            "send me a screenshot",
-            "take a screenshot",
-            "screenshot"
-        }
-        if cmd_norm in screenshot_keywords:
-            hud = getattr(self, "hud", None)
-            filepath = os.path.join(os.getcwd(), "screenshots", "hud_telegram.png")
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            if hud and hud.isVisible():
-                hud.grab().save(filepath)
-                caption = "Here is the screenshot of the HUD, Sir."
-            else:
-                import pyautogui
-                pyautogui.screenshot(filepath)
-                caption = "Here is the full screen capture (HUD is hidden), Sir."
-                
-            if source == "telegram":
-                self.telegram_bot.send_photo(self.last_telegram_chat_id, filepath, caption)
-            else:
-                speech.speak("I have captured the screenshot for you, Sir.")
-            return
-
-        # Calculate audio quality for voice source
-        audio_quality = 1.0
-        if source == "voice":
-            from services.audio_service import audio_service
-            rms = getattr(audio_service, "last_raw_rms", 0.15)
-            peak = getattr(audio_service, "last_peak_val", 0.5)
-            duration = getattr(audio_service, "last_duration", 2.0)
-            ambient = getattr(audio_service, "ambient_rms", 0.0)
-            
-            q = 1.0
-            if rms < 0.003:
-                q -= 0.4
-            elif rms < 0.015:
-                q -= 0.1
-            if peak >= 0.99:
-                q -= 0.2
-            if ambient > 0.02:
-                q -= 0.2
-            if duration < 0.8:
-                q -= 0.2
-            audio_quality = max(0.0, min(1.0, q))
-            logger.info(f"Engine audio quality assessment: rms={rms:.6f}, peak={peak:.4f}, duration={duration:.2f}s, ambient={ambient:.6f} -> audio_quality={audio_quality:.2f}")
-
         if self.pending_command:
-            normalized_ans = raw_command.lower().strip()
-            logger.info(f"Confirmation response: '{raw_command}'")
+            normalized_ans = raw_text.lower().strip()
+            logger.info(f"Confirmation response [Req ID: {request_id[:8]}]: '{raw_text}'")
 
             yes_indicators = ["yes", "yeah", "correct", "confirm", "do it", "proceed", "okay", "ok"]
-            no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont"]
+            no_indicators = ["no", "nope", "cancel", "wrong", "incorrect", "dont", "never mind", "don't"]
 
             def _is_match(indicator: str, response: str) -> bool:
                 return bool(re.search(rf"\b{re.escape(indicator)}\b", response))
@@ -1372,27 +1214,14 @@ class JarvisEngine(QObject):
                 self.pending_command_type = None
                 self.misheard_command = None
 
-                if cmd_type == "near_miss_call_resolution":
-                    # Transition to second-step TrustGate dial confirmation
-                    self.pending_command = cmd_to_run
-                    self.pending_command_type = "place_call"
-                    self.misheard_command = raw_command
-                    self.transition_to("WAITING_FOR_CONFIRMATION")
-                    
-                    parts = cmd_to_run.split(":")
-                    number = parts[1]
-                    name = parts[2] if len(parts) > 2 else "Unknown"
-                    confirm_phrase = f"Do you want me to call {name} at {number}, {salutation}?"
-                    speech.speak(confirm_phrase)
-                    return
-
-                if cmd_type == "lifecycle_sleep":
+                if cmd_type in ("lifecycle_sleep", "sensitive_action") and cmd_to_run in ("shut down", "shutdown", "sleep"):
                     self.sleep_jarvis()
-                elif cmd_type == "lifecycle_exit":
+                elif cmd_type in ("lifecycle_exit", "sensitive_action") and cmd_to_run in ("exit app", "close jarvis"):
                     self.full_exit_jarvis()
                 else:
                     self.transition_to("TRANSCRIBING_COMMAND")
                     self._launch_worker(cmd_to_run)
+                return
             elif any(_is_match(ans, normalized_ans) for ans in no_indicators):
                 logger.info("Command rejected/cancelled by user.")
                 self.pending_command = None
@@ -1401,6 +1230,7 @@ class JarvisEngine(QObject):
                 self.transition_to("SPEAKING_RESPONSE")
                 speech.speak(f"Command cancelled, {salutation}.")
                 self._schedule_return_to_session_after_speech()
+                return
             else:
                 logger.info("Unclear confirmation reply.")
                 self.pending_command = None
@@ -1409,12 +1239,49 @@ class JarvisEngine(QObject):
                 self.transition_to("SPEAKING_RESPONSE")
                 speech.speak(f"Request cancelled, {salutation}.")
                 self._schedule_return_to_session_after_speech()
+                return
+
+        # TranscriptResolver handling
+        from services.conversation.transcript_resolver import transcript_resolver
+        resolved_tr = transcript_resolver.resolve(
+            raw_text,
+            stt_confidence=stt_confidence,
+            audio_quality=audio_quality
+        )
+        logger.info(
+            f"TranscriptResolver | Req ID: {request_id[:8]} | Raw: '{raw_text}' | "
+            f"Resolved: '{resolved_tr.resolved_text}' | Conf: {resolved_tr.confidence:.2f} | "
+            f"Wake: {resolved_tr.wake_word_detected} ({resolved_tr.wake_word_position}) | "
+            f"Clarify: {resolved_tr.needs_clarification} | Sensitive: {resolved_tr.is_sensitive_action}"
+        )
+
+        if resolved_tr.needs_clarification:
+            if resolved_tr.is_sensitive_action or "shut down" in resolved_tr.resolved_text.lower():
+                self.pending_command = resolved_tr.resolved_text
+                self.pending_command_type = "sensitive_action"
+                self.transition_to("WAITING_FOR_CONFIRMATION")
+                speech.speak(resolved_tr.clarification_question or f"Did you ask me to {resolved_tr.resolved_text}?")
+                return
+            else:
+                self.transition_to("SPEAKING_RESPONSE")
+                speech.speak(resolved_tr.clarification_question or "Sorry Sir, I could not understand.")
+                self._schedule_return_to_session_after_speech()
+                return
+
+        if resolved_tr.is_sensitive_action and source not in ("telegram", "typed"):
+            self.pending_command = resolved_tr.resolved_text
+            self.pending_command_type = "sensitive_action"
+            self.transition_to("WAITING_FOR_CONFIRMATION")
+            speech.speak(f"Do you want me to {resolved_tr.resolved_text}, {salutation}?")
             return
+
+        raw_command_str = raw_text
+        raw_command_str, rep_count = collapse_repeated_command(raw_command_str)
+        is_low_confidence = (rep_count >= 3)
 
         # Step collection interception (Prefix-free)
         if self.creation_routine_name:
-            normalized_cmd = raw_command.lower().strip()
-            # Clean punctuation
+            normalized_cmd = raw_command_str.lower().strip()
             normalized_cmd = re.sub(r"[.,!?;:'\"]+", "", normalized_cmd).strip()
             
             if normalized_cmd == "done":
@@ -1429,8 +1296,8 @@ class JarvisEngine(QObject):
                 speech.speak(msg)
                 self._schedule_return_to_session_after_speech()
             else:
-                self.creation_routine_steps.append(raw_command)
-                logger.info(f"Added step to routine '{self.creation_routine_name}': {raw_command}")
+                self.creation_routine_steps.append(raw_command_str)
+                logger.info(f"Added step to routine '{self.creation_routine_name}': {raw_command_str}")
                 
                 self.transition_to("SPEAKING_RESPONSE")
                 speech.speak("Got it. Anything else, or say 'done' to finish.")
@@ -1440,9 +1307,12 @@ class JarvisEngine(QObject):
         if self.in_session:
             if source in ("telegram", "typed"):
                 has_prefix = True
-                stripped = raw_command
+                stripped = raw_command_str
+            elif resolved_tr.wake_word_detected:
+                has_prefix = True
+                stripped = resolved_tr.resolved_text
             else:
-                has_prefix, stripped = self.strip_session_prefix(raw_command)
+                has_prefix, stripped = self.strip_session_prefix(raw_command_str)
 
             if not has_prefix and self.awaiting_followup:
                 logger.info(f"Prefix-free follow-up accepted: '{raw_command}'")

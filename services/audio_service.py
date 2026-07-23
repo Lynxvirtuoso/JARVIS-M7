@@ -7,9 +7,66 @@ import wave
 import numpy as np
 import sounddevice as sd
 from difflib import SequenceMatcher
+from dataclasses import dataclass
 from core.event_bus import bus
 from core.logger import logger
 from core.config import config
+
+
+@dataclass
+class AudioProcessingResult:
+    audio_data: np.ndarray
+    original_rms: float
+    original_peak: float
+    processed_rms: float
+    processed_peak: float
+    clipping_detected: bool
+    audio_quality: float
+
+
+def process_audio_safely(audio_data: np.ndarray, target_peak: float = 0.95) -> AudioProcessingResult:
+    """
+    Safely scales and limits input audio without amplifying already clipped input.
+    """
+    if audio_data is None or len(audio_data) == 0:
+        return AudioProcessingResult(
+            audio_data=np.array([], dtype=np.float32),
+            original_rms=0.0,
+            original_peak=0.0,
+            processed_rms=0.0,
+            processed_peak=0.0,
+            clipping_detected=False,
+            audio_quality=1.0
+        )
+
+    audio = np.array(audio_data, dtype=np.float32, copy=True)
+    orig_peak = float(np.max(np.abs(audio))) if len(audio) > 0 else 0.0
+    orig_rms = float(np.sqrt(np.mean(audio**2))) if len(audio) > 0 else 0.0
+    is_clipped = bool(orig_peak >= 0.98)
+    audio_quality = 1.0
+
+    if orig_peak > 1.0:
+        # Overloaded/clipped input -> do NOT amplify, scale down safely
+        audio = audio / orig_peak * target_peak
+        clip_severity = orig_peak - 1.0
+        audio_quality = max(0.3, 1.0 - clip_severity * 1.5)
+    elif orig_peak > 0.0 and orig_peak < 0.9:
+        gain = min(0.9 / orig_peak, 2.5)
+        audio = audio * gain
+
+    audio = np.clip(audio, -1.0, 1.0)
+    proc_peak = float(np.max(np.abs(audio))) if len(audio) > 0 else 0.0
+    proc_rms = float(np.sqrt(np.mean(audio**2))) if len(audio) > 0 else 0.0
+
+    return AudioProcessingResult(
+        audio_data=audio,
+        original_rms=orig_rms,
+        original_peak=orig_peak,
+        processed_rms=proc_rms,
+        processed_peak=proc_peak,
+        clipping_detected=is_clipped,
+        audio_quality=audio_quality
+    )
 
 # ===========================================================================
 # TEMPORARY DEBUGGING FEATURE: Session-wide audio recording
@@ -820,34 +877,18 @@ class AudioService(threading.Thread):
             bus.command_transcription_failed.emit("audio too close to noise floor")
             return
 
-        logger.info(
-            f"\nCommand recording started\n"
-            f"Original sample rate: {self.active_sample_rate}\n"
-            f"Resampled sample rate: 16000\n"
-            f"Command audio duration: {duration:.1f}s\n"
-            f"Audio RMS: {avg_rms:.4f}\n"
-            f"Peak level: {peak_val:.4f}\n"
-        )
-
         # Safe audio volume processing & peak scaling
-        orig_peak = float(np.max(np.abs(audio_data)))
-        orig_rms = float(np.sqrt(np.mean(audio_data**2)))
-        is_clipped = bool(orig_peak >= 0.98)
-        audio_quality = 1.0
+        proc_res = process_audio_safely(audio_data)
+        audio_data = proc_res.audio_data
+        orig_peak = proc_res.original_peak
+        orig_rms = proc_res.original_rms
+        proc_peak = proc_res.processed_peak
+        proc_rms = proc_res.processed_rms
+        is_clipped = proc_res.clipping_detected
+        audio_quality = proc_res.audio_quality
 
-        if orig_peak > 1.0:
-            # Overloaded/clipped input -> do NOT amplify, scale down safely
-            audio_data = audio_data / orig_peak * 0.95
-            clip_severity = orig_peak - 1.0
-            audio_quality = max(0.3, 1.0 - clip_severity * 1.5)
-            logger.warning(f"Audio clipping detected (peak: {orig_peak:.4f}). Scaled down to 0.95. Quality factor: {audio_quality:.2f}")
-        elif orig_peak > 0.0 and orig_peak < 0.9:
-            gain = min(0.9 / orig_peak, 2.5)
-            audio_data = audio_data * gain
-
-        audio_data = np.clip(audio_data, -1.0, 1.0)
-        proc_peak = float(np.max(np.abs(audio_data)))
-        proc_rms = float(np.sqrt(np.mean(audio_data**2)))
+        if is_clipped:
+            logger.warning(f"Audio clipping detected (peak: {orig_peak:.4f}). Scaled down to {proc_peak:.2f}. Quality factor: {audio_quality:.2f}")
 
         logger.info(
             f"\nCommand audio processed:\n"
@@ -871,16 +912,16 @@ class AudioService(threading.Thread):
             wav_bytes = wav_io.getvalue()
 
             from services.stt.prompt_builder import stt_prompt_builder
+            is_pending = bool(getattr(getattr(self, "engine", None), "pending_command", None))
             initial_prompt = stt_prompt_builder.build_prompt(
                 mode="active_command",
-                relevant_apps=["Google Chrome", "Visual Studio Code", "Notepad", "Settings"]
+                pending_confirmation=is_pending
             )
             stt_lang = config.get("stt_language", "en")
 
             import time
             stt_start_time = time.monotonic()
             from services.stt.provider_manager import stt_manager
-            logger.info(f"STT API Call initial_prompt payload: '{initial_prompt}'")
             stt_result = stt_manager.transcribe(
                 wav_bytes,
                 audio_format="wav",
@@ -1043,8 +1084,24 @@ class AudioService(threading.Thread):
             return
 
         if transcription:
-            # Signal the engine with the transcribed text — it will route and execute.
-            bus.command_transcription_completed.emit(transcription)
+            import uuid
+            import time
+            from services.conversation.models import ConversationRequest
+            req = ConversationRequest(
+                request_id=uuid.uuid4().hex,
+                session_id=getattr(self, "session_id", "default_session"),
+                raw_transcript=raw_text,
+                cleaned_transcript=transcription,
+                created_at=time.time(),
+                audio_quality=audio_quality,
+                original_audio_peak=orig_peak,
+                processed_audio_peak=proc_peak,
+                clipping_detected=is_clipped,
+                stt_confidence=getattr(stt_result, "confidence", 0.90),
+                stt_provider=getattr(stt_result, "provider", "groq_stt")
+            )
+            # Signal the engine with the structured ConversationRequest
+            bus.command_transcription_completed.emit(req)
         else:
             logger.warning("Empty transcription. Reason: whisper returned no segments.")
             bus.command_transcription_failed.emit("empty transcription")

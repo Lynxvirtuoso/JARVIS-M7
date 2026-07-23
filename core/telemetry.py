@@ -2,9 +2,12 @@ import time
 import threading
 from core.logger import logger
 
+import uuid
+
 class TelemetryContext:
-    def __init__(self, command: str):
+    def __init__(self, command: str, request_id: str | None = None):
         self.command = command
+        self.request_id = request_id or uuid.uuid4().hex
         self.start_time = time.time()
         self.events = []
 
@@ -31,8 +34,9 @@ class PipelineTimer:
         self._local.current_context = None
         self.active_playing_context = None
 
-    def start_pipeline(self, command: str):
-        ctx = TelemetryContext(command)
+    def start_pipeline(self, command: str, request_id: str | None = None) -> None:
+        self.reset()
+        ctx = TelemetryContext(command, request_id=request_id)
         self.set_thread_context(ctx)
         self.log_event("transcript received (STT complete)")
 

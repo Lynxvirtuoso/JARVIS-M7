@@ -12,8 +12,11 @@ from services.conversation.models import ResolvedTranscript
 WAKE_VARIANTS = [r"\bjarvis\b", r"\bjervis\b", r"\bjavis\b", r"\bhey jarvis\b"]
 
 SENSITIVE_KEYWORDS = {
-    "shut down", "shutdown", "exit", "restart", "delete", "remove",
-    "lock", "lock pc", "send", "payment", "account", "clear database", "format"
+    "shut down", "shutdown", "exit", "close jarvis", "exit app", "close application",
+    "turn off pc", "shut down pc", "restart", "reboot", "log out", "logout",
+    "delete", "remove", "lock", "lock pc", "send", "send message",
+    "send email", "place call", "make payment", "payment", "account",
+    "clear database", "format", "remove account"
 }
 
 # Phonetic & misrecognition dictionary mapping pattern -> (resolved_text, is_sensitive, default_clarification)
@@ -92,10 +95,10 @@ class TranscriptResolver:
                 matched_correction = (resolved, is_sens, clarif_q)
                 break
 
-        # Calculate baseline confidence
+        # Calculate effective confidence bound between 0.0 and 1.0
         base_confidence = stt_confidence if stt_confidence is not None else 0.90
-        # Reduce confidence if audio quality is degraded by clipping
-        final_confidence = base_confidence * min(1.0, max(0.2, audio_quality))
+        effective_confidence = base_confidence * min(1.0, max(0.0, audio_quality))
+        final_confidence = max(0.0, min(1.0, effective_confidence))
 
         if matched_correction:
             resolved_text, is_sensitive, clarification_question = matched_correction
@@ -112,8 +115,8 @@ class TranscriptResolver:
                 is_sensitive_action=is_sensitive
             )
 
-        # Check general sensitive action keywords
-        is_sensitive = any(kw in cleaned_text.lower() for kw in SENSITIVE_KEYWORDS)
+        # Check general sensitive action keywords (checking both cleaned text and full raw text)
+        is_sensitive = any(kw in cleaned_text.lower() or kw in text_lower for kw in SENSITIVE_KEYWORDS)
 
         # Decision thresholding
         needs_clarification = False

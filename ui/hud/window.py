@@ -736,10 +736,16 @@ class HUDWindow(QMainWindow):
         if "sounding_idx" in state:
             self.music_space_screen.set_sounding_index(state["sounding_idx"])
 
-    @pyqtSlot(str)
-    def on_transcription_completed(self, text: str):
-        if text:
-            self.transcript.lbl_text.setText(text)
+    @pyqtSlot(object)
+    def on_transcription_completed(self, payload):
+        if not payload:
+            return
+        if hasattr(payload, "cleaned_transcript"):
+            display_text = payload.cleaned_transcript or payload.raw_transcript
+        else:
+            display_text = str(payload)
+        if display_text:
+            self.transcript.lbl_text.setText(display_text)
 
     @pyqtSlot(str)
     def on_stream_token_received(self, chunk: str):

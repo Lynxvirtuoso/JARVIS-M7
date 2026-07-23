@@ -126,7 +126,7 @@ class TestStreamingTTSQueue(unittest.TestCase):
 
         # New request should be accepted
         self.assertTrue(q.enqueue_sentence(id2, "Sentence 1 from request 2"))
-        item = q.get_next_item(timeout=0.5)
+        item = q.get_next_item(timeout=0.01)
         self.assertIsNotNone(item)
         self.assertEqual(item.request_id, id2)
         self.assertEqual(item.text, "Sentence 1 from request 2")
@@ -139,7 +139,7 @@ class TestStreamingTTSQueue(unittest.TestCase):
 
         q.cancel_active_request()
         self.assertFalse(q.is_request_active(req_id))
-        item = q.get_next_item(timeout=0.1)
+        item = q.get_next_item(timeout=0.01)
         self.assertIsNone(item)
 
     def test_empty_sentence_not_enqueued(self):
@@ -154,7 +154,7 @@ class TestStreamingTTSQueue(unittest.TestCase):
         for i in range(5):
             q.enqueue_sentence(req_id, f"Sentence number {i} in the queue.")
         for i in range(5):
-            item = q.get_next_item(timeout=0.5)
+            item = q.get_next_item(timeout=0.01)
             self.assertIsNotNone(item)
             self.assertEqual(item.sequence, i)
             q.task_done()

@@ -16,7 +16,7 @@ class EventBusLogHandler(logging.Handler):
             msg = self.format(record)
             bus.console_log.emit(record.levelname, msg)
         except Exception:
-            self.handleError(record)
+            pass  # Avoid --- Logging error --- outputs during thread exit or Qt shutdown
 
 class RedactingFormatter(logging.Formatter):
     """Sanitizes sensitive tokens, API keys, and credentials from log output."""

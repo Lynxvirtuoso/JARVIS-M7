@@ -45,13 +45,25 @@ class SpeechEngine(threading.Thread):
         cooldown_ms = int(config.get("tts_mic_cooldown_ms", "800"))
         return (time.time() - self.speech_end_time) < (cooldown_ms / 1000.0)
 
-    def speak(self, text):
+    def speak(self, text, request_id: str | None = None):
         from services.tts.sanitizer import sanitize_for_tts
-        from core.telemetry import pipeline_timer
+        from core.telemetry import pipeline_timer, TelemetryContext
+        import uuid
         sanitized = sanitize_for_tts(text) if text else ""
         if not sanitized:
             return
         ctx = pipeline_timer.get_thread_context()
+        if ctx is None:
+            req_id = request_id or f"sys-{uuid.uuid4().hex[:8]}"
+            ctx = TelemetryContext(sanitized, request_id=req_id)
+        elif request_id:
+            ctx.request_id = request_id
+
+        req_id_str = getattr(ctx, "request_id", None)
+        self.active_request_id = req_id_str
+        if req_id_str:
+            from services.tts.streaming_tts_queue import streaming_tts_queue
+            streaming_tts_queue._active_request_id = req_id_str
         self.queue.put((sanitized, ctx))
 
     def stop(self):
