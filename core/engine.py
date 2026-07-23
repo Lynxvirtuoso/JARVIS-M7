@@ -1,4 +1,4 @@
-﻿import re
+import re
 import time
 import json
 import os
@@ -377,9 +377,10 @@ class CommandWorker(QThread):
 
                 # Preserve original command request_id through the entire stream lifecycle
                 stream_req_id = self.request_id
-                streaming_tts_queue.start_new_request(request_id=stream_req_id)
                 if stream_req_id:
-                    _speech_svc.start_request(stream_req_id)
+                    _speech_svc.begin_request(stream_req_id)
+                else:
+                    streaming_tts_queue.start_new_request(request_id=stream_req_id)
                 sentence_buffer = SentenceBuffer(
                     minimum_chars=int(config.get("tts_sentence_min_chars", 24)),
                     maximum_chars=int(config.get("tts_sentence_max_chars", 220)),
@@ -415,8 +416,8 @@ class CommandWorker(QThread):
                             if not first_sentence_spoken:
                                 first_sentence_spoken = True
                                 pipeline_timer.log_event("first complete sentence synthesized/queued")
-                            # Always pass the original command request_id to every spoken sentence
-                            speech.speak(s, request_id=stream_req_id)
+                            # Enqueue streamed sentence without re-initializing request
+                            speech.enqueue_sentence(s, request_id=stream_req_id)
                             bus.stream_token_received.emit(s)
                 except Exception as e:
                     logger.error(f"Error during streaming LLM response: {e}")
@@ -439,7 +440,7 @@ class CommandWorker(QThread):
                 for leftover in leftover_sentences:
                     if tts_manager.interrupt_flag.is_set() or not streaming_tts_queue.is_request_active(stream_req_id):
                         break
-                    speech.speak(leftover, request_id=stream_req_id)
+                    speech.enqueue_sentence(leftover, request_id=stream_req_id)
                     bus.stream_token_received.emit(leftover)
 
                 pipeline_timer.log_event("action executed OR LLM response received")

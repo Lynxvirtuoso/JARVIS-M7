@@ -1,4 +1,4 @@
-﻿"""
+"""
 services/conversation/models.py
 Data models and data structures for Phase 1 Listening Reliability & Conversational Intelligence.
 """
@@ -88,6 +88,9 @@ class SpeechLifecycleState:
     to allow unit tests to instantiate it without triggering the SpeechEngine thread."""
     request_id: str
     producer_finished: bool = False
-    synthesis_active: bool = False
-    speech_ended_emitted: bool = False
+    synthesis_active: int = 0
+    queued_text_count: int = 0
+    queued_audio_count: int = 0
+    provider_playing: bool = False
     cancelled: bool = False
+    speech_ended_emitted: bool = False

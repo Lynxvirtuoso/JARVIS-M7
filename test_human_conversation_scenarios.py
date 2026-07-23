@@ -1,4 +1,4 @@
-﻿"""
+"""
 test_human_conversation_scenarios.py
 Comprehensive test suite for Phase 1 Final Critical Integration Repair in JARVIS M7.
 Tests cover: sensitive action mapping, ambiguous shutdown, confirmation security,
@@ -634,6 +634,72 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
 
             self.assertFalse(t1.is_alive(), f"Iteration {i}: synth thread deadlocked")
             self.assertFalse(t2.is_alive(), f"Iteration {i}: producer thread deadlocked")
+
+
+    # ----- 15. Stream Initialization & Enqueue Separation Tests -----
+
+    def test_same_request_two_sentences_enqueued_cleanly(self):
+        """Enqueueing two sentences for same request preserves queue, sequence numbers, and active request ID."""
+        from services.speech_service import speech
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+
+        req_id = "req-two-sent-001"
+        speech.begin_request(req_id)
+        self.assertEqual(streaming_tts_queue.active_request_id, req_id)
+
+        speech.enqueue_sentence("First sentence.", request_id=req_id)
+        speech.enqueue_sentence("Second sentence.", request_id=req_id)
+
+        self.assertEqual(streaming_tts_queue.active_request_id, req_id)
+        state = speech.engine._lifecycles.get(req_id)
+        self.assertEqual(state.queued_text_count, 2)
+
+    def test_same_request_repeated_speak_preserves_lifecycle_identity(self):
+        """Calling speak(begin_request=False) or enqueue_sentence retains the exact same SpeechLifecycleState instance."""
+        from services.speech_service import speech
+
+        req_id = "req-identity-001"
+        speech.begin_request(req_id)
+        state_before = speech.engine._lifecycles.get(req_id)
+
+        speech.enqueue_sentence("Additional sentence.", request_id=req_id)
+        state_after = speech.engine._lifecycles.get(req_id)
+
+        self.assertIs(state_after, state_before)
+        self.assertEqual(state_after.queued_text_count, 1)
+
+    def test_producer_completion_and_speech_ended_once(self):
+        """Producer finished + empty queues emits speech_ended exactly once."""
+        from services.speech_service import speech
+
+        req_id = "req-single-ended-001"
+        speech.begin_request(req_id)
+
+        # Mark producer finished when queues are already empty
+        speech.mark_producer_finished(req_id)
+
+        state = speech.engine._lifecycles.get(req_id)
+        self.assertTrue(state.producer_finished)
+        self.assertTrue(state.speech_ended_emitted)
+
+        # Calling again should not re-emit
+        speech.mark_producer_finished(req_id)
+        self.assertTrue(state.speech_ended_emitted)
+
+    def test_idempotent_start_new_request_preserves_sequence(self):
+        """start_new_request with the active ID does not clear queue or reset sequence."""
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+
+        req_id = "req-idempotent-001"
+        streaming_tts_queue.start_new_request(request_id=req_id)
+        streaming_tts_queue.enqueue_sentence(req_id, "Sentence 1")
+
+        # Second call with same ID
+        streaming_tts_queue.start_new_request(request_id=req_id)
+        self.assertEqual(streaming_tts_queue.active_request_id, req_id)
+        item = streaming_tts_queue.get_next_item(timeout=0.1)
+        self.assertIsNotNone(item)
+        self.assertEqual(item.text, "Sentence 1")
 
 
 if __name__ == "__main__":

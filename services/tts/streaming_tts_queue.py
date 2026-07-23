@@ -1,4 +1,4 @@
-﻿"""
+"""
 services/tts/streaming_tts_queue.py
 Ordered queue manager for sentence-level streaming TTS synthesis and playback.
 Provides request-ID tracking, stale item filtering, backpressure, and immediate cancellation.
@@ -32,17 +32,32 @@ class StreamingTTSQueue:
 
     def start_new_request(self, request_id: str | None = None) -> str:
         """
-        Starts a new request, invalidating any previous request items and clearing the queue.
-        If request_id is provided, reuses it (preserving original command ID through streaming).
-        If not, generates a new UUID.
+        Starts a new request session, invalidating any previous request items and clearing the queue.
+        Idempotent: If request_id is already the active request ID, returns it without clearing queue or resetting sequence.
         """
         with self._lock:
-            self._active_request_id = request_id if request_id else uuid.uuid4().hex
+            resolved_id = request_id or uuid.uuid4().hex
+            if self._active_request_id == resolved_id:
+                return resolved_id
+
+            self._active_request_id = resolved_id
             self._next_sequence = 0
             self._clear_queue_unlocked()
             logger.info(f"[STREAMING TTS] Started new request ID: {self._active_request_id}")
             return self._active_request_id
 
+    def cancel_request(self, request_id: str) -> bool:
+        """
+        Cancels the specified request ID if it is currently active.
+        """
+        with self._lock:
+            if self._active_request_id == request_id:
+                logger.info(f"[STREAMING TTS] Cancelling request ID: {request_id}")
+                self._active_request_id = None
+                self._next_sequence = 0
+                self._clear_queue_unlocked()
+                return True
+            return False
 
     @property
     def active_request_id(self) -> str | None:
