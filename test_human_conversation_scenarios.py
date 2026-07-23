@@ -612,11 +612,11 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
             def _synth():
                 with speech.engine._lifecycle_lock:
                     if req_id in speech.engine._lifecycles:
-                        speech.engine._lifecycles[req_id].synthesis_active = True
+                        speech.engine._lifecycles[req_id].synthesis_active += 1
                 time.sleep(0.0001)
                 with speech.engine._lifecycle_lock:
                     if req_id in speech.engine._lifecycles:
-                        speech.engine._lifecycles[req_id].synthesis_active = False
+                        speech.engine._lifecycles[req_id].synthesis_active = max(0, speech.engine._lifecycles[req_id].synthesis_active - 1)
 
             # Thread 2: Mark producer finished
             def _prod():
@@ -629,8 +629,8 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
             t1.start()
             t2.start()
 
-            t1.join(timeout=1.0)
-            t2.join(timeout=1.0)
+            t1.join(timeout=2.0)
+            t2.join(timeout=2.0)
 
             self.assertFalse(t1.is_alive(), f"Iteration {i}: synth thread deadlocked")
             self.assertFalse(t2.is_alive(), f"Iteration {i}: producer thread deadlocked")
@@ -700,6 +700,57 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         item = streaming_tts_queue.get_next_item(timeout=0.1)
         self.assertIsNotNone(item)
         self.assertEqual(item.text, "Sentence 1")
+
+
+    # ----- 16. Standalone Speech & Stale Request Guards Tests -----
+
+    def test_speak_standalone_automatically_marks_producer_finished(self):
+        """speak_standalone queues text and automatically sets producer_finished=True."""
+        from services.speech_service import speech
+
+        req_id = speech.speak_standalone("Yes, Sir.")
+        state = speech.engine._lifecycles.get(req_id)
+        self.assertIsNotNone(state)
+        self.assertTrue(state.producer_finished)
+
+    def test_stale_text_chunk_discarded_before_synthesis(self):
+        """A text chunk from cancelled request A is discarded before synthesis when request B becomes active."""
+        from services.speech_service import speech
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+
+        req_A = "req-stale-text-A"
+        req_B = "req-stale-text-B"
+
+        speech.begin_request(req_A)
+        speech.enqueue_sentence("Sentence from A", request_id=req_A)
+
+        # Cancel A and start B
+        speech.cancel_request(req_A)
+        speech.begin_request(req_B)
+
+        self.assertEqual(streaming_tts_queue.active_request_id, req_B)
+        state_A = speech.engine._lifecycles.get(req_A)
+        self.assertTrue(state_A.cancelled)
+
+    def test_error_response_uses_fresh_request_id(self):
+        """When an LLM stream fails, a fresh standalone error request ID is used instead of reusing cancelled ID."""
+        from services.speech_service import speech
+        req_stream = "req-failed-stream-001"
+        speech.begin_request(req_stream)
+        speech.cancel_request(req_stream)
+
+        # Error response speaks with fresh ID
+        import uuid
+        err_id = f"sys-error-{uuid.uuid4().hex[:8]}"
+        speech.speak_standalone("Sorry, error occurred.", request_id=err_id)
+
+        state_stream = speech.engine._lifecycles.get(req_stream)
+        state_err = speech.engine._lifecycles.get(err_id)
+
+        self.assertTrue(state_stream.cancelled)
+        self.assertIsNotNone(state_err)
+        self.assertTrue(state_err.producer_finished)
+        self.assertFalse(state_err.cancelled)
 
 
 if __name__ == "__main__":

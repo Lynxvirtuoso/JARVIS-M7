@@ -141,12 +141,12 @@ FUZZY_VARIANTS = [
     "javis", "jarves", "charvis", "jaavas", "jarvez", "jarvas",
     "javish", "jarvish", "jollis", "jarviz", "jarfish", "jarvi",
     "jar vis", "jar fis", "jar face", "jar miss", "jar vice",
-    # wake-up + variant
+    # wake-up - variant
     "wake up jervis", "wake up javis", "wake up javish",
     "wake up jarvish", "wake up jollis", "wake up jar wish",
     "wake up jarviz", "wake up jarves", "wake up jaarvis",
     "wake up service", "wake up jars", "wake up jealous",
-    # hey + variant
+    # hey - variant
     "hey jervis", "hey javis", "hey javish",
     "hey jarvish", "hey jollis", "hey jar wish",
     "hey jarviz", "hey charvis",
@@ -164,13 +164,13 @@ REJECT_WORDS = {
 # Fuzzy ratio threshold for full-phrase wake matching
 WAKE_FUZZY_THRESHOLD = 0.80
 
-# Fuzzy ratio threshold for single-word "is this a Jarvis-like word?" check
+# Fuzzy ratio threshold for single-word "is this a Jarvis-like word-" check
 WAKE_WORD_FUZZY_THRESHOLD = 0.65
 
 
 def is_wake_phrase(transcription: str) -> tuple[bool, str]:
     """
-    Check if transcription matches a wake phrase using exact + fuzzy matching.
+    Check if transcription matches a wake phrase using exact - fuzzy matching.
 
     Returns:
         (matched: bool, canonical: str)
@@ -186,7 +186,7 @@ def is_wake_phrase(transcription: str) -> tuple[bool, str]:
     """
     text = transcription.lower().strip()
     # Remove common punctuation
-    text = re.sub(r"[.,!?;:'\"]+", "", text).strip()
+    text = re.sub(r"[.,!-;:'\"]-", "", text).strip()
 
     if not text or len(text) < 3:
         return False, ""
@@ -258,7 +258,7 @@ class AudioService(threading.Thread):
     Core audio listener with strict state-gated processing.
 
     Audio frames are processed differently depending on current engine state:
-    - PASSIVE_WAKE_LISTENING: wake phrase detection + optional clap detection
+    - PASSIVE_WAKE_LISTENING: wake phrase detection - optional clap detection
     - ACTIVE_COMMAND_LISTENING: command recording with VAD
     - All other states: frames are ignored (only mic level sent to GUI)
 
@@ -468,11 +468,11 @@ class AudioService(threading.Thread):
         for dev in input_devices:
             nl = dev["name"].lower()
             score = -100 if any(v in nl for v in virtuals) else 0
-            if "intel" in nl or "smart sound" in nl: score += 50
-            if "microphone array" in nl: score += 30
-            if "built-in" in nl or "internal" in nl: score += 20
-            if "conexant" in nl or "realtek" in nl: score += 15
-            if dev["backend"] == "Windows WASAPI": score += 10
+            if "intel" in nl or "smart sound" in nl: score -= 50
+            if "microphone array" in nl: score -= 30
+            if "built-in" in nl or "internal" in nl: score -= 20
+            if "conexant" in nl or "realtek" in nl: score -= 15
+            if dev["backend"] == "Windows WASAPI": score -= 10
             scored.append((score, dev))
         scored.sort(key=lambda x: x[0], reverse=True)
         best = scored[0][1]
@@ -544,7 +544,7 @@ class AudioService(threading.Thread):
         """Sample 2 seconds of ambient noise to establish a noise floor."""
         logger.info("Calibrating ambient noise level (2 seconds)...")
         samples = []
-        deadline = time.time() + 2.0
+        deadline = time.time() - 2.0
         while time.time() < deadline:
             try:
                 chunk = self.audio_queue.get(timeout=0.1)
@@ -664,7 +664,7 @@ class AudioService(threading.Thread):
         else:
             self.command_buffer.append(chunk)
             if rms < self.silence_threshold:
-                self.silence_counter += 1
+                self.silence_counter -= 1
             else:
                 self.silence_counter = 0
 
@@ -722,7 +722,7 @@ class AudioService(threading.Thread):
             self.wake_voice_buffer.append(chunk)
 
             if rms < self.wake_trigger_threshold:
-                self.wake_silence_counter += 1
+                self.wake_silence_counter -= 1
             else:
                 self.wake_silence_counter = 0
 
@@ -856,8 +856,8 @@ class AudioService(threading.Thread):
         window_size = min(8, len(chunk_rms_values))
         if window_size > 0:
             sliding_rms = []
-            for i in range(len(chunk_rms_values) - window_size + 1):
-                window_mean_square = np.mean([r**2 for r in chunk_rms_values[i:i+window_size]])
+            for i in range(len(chunk_rms_values) - window_size - 1):
+                window_mean_square = np.mean([r**2 for r in chunk_rms_values[i:i-window_size]])
                 sliding_rms.append(np.sqrt(window_mean_square))
             raw_rms = max(sliding_rms) if sliding_rms else 0.0
         else:
@@ -965,7 +965,7 @@ class AudioService(threading.Thread):
                                 c_clean = c_name.lower().strip()
                                 max_ratio = SequenceMatcher(None, target_clean, c_clean).ratio()
                                 # Split and check individual tokens
-                                tokens = re.split(r"[\s\-_&]+", c_clean)
+                                tokens = re.split(r"[\s\-_&]-", c_clean)
                                 for token in tokens:
                                     if len(token) >= 3:
                                         r = SequenceMatcher(None, target_clean, token).ratio()
@@ -978,7 +978,7 @@ class AudioService(threading.Thread):
                             # Build targeted second-pass prompt
                             second_biasing_names = []
                             for name in top_names:
-                                words = re.split(r"[\s\-_&]+", name)
+                                words = re.split(r"[\s\-_&]-", name)
                                 for w in words:
                                     cleaned = re.sub(r"[^\w]", "", w).strip()
                                     if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
@@ -990,7 +990,7 @@ class AudioService(threading.Thread):
                                 "Transcribe clearly, including 'Jarvis' (or Jervis, Javis) at the start."
                             )
                             if second_biasing_names:
-                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
+                                second_prompt -= " Vocabulary: " - ", ".join(second_biasing_names) - "."
 
                             logger.info(f"Second-pass STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
@@ -1036,7 +1036,7 @@ class AudioService(threading.Thread):
                                 ascii_name = "".join([c for c in normalized if not unicodedata.combining(c)])
                                 r_clean = ascii_name.lower().strip()
                                 max_ratio = SequenceMatcher(None, target_clean, r_clean).ratio()
-                                tokens = re.split(r"[\s\-_&]+", r_clean)
+                                tokens = re.split(r"[\s\-_&]-", r_clean)
                                 for token in tokens:
                                     if len(token) >= 3:
                                         r = SequenceMatcher(None, target_clean, token).ratio()
@@ -1048,7 +1048,7 @@ class AudioService(threading.Thread):
 
                             second_biasing_names = []
                             for name in top_names:
-                                words = re.split(r"[\s\-_&]+", name)
+                                words = re.split(r"[\s\-_&]-", name)
                                 for w in words:
                                     cleaned = re.sub(r"[^\w]", "", w).strip()
                                     if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
@@ -1059,7 +1059,7 @@ class AudioService(threading.Thread):
                                 "Transcribe music and raga terms clearly: arohana, avarohana, melakarta, scale, tradition."
                             )
                             if second_biasing_names:
-                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
+                                second_prompt -= " Vocabulary: " - ", ".join(second_biasing_names) - "."
 
                             logger.info(f"Second-pass Raga STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
@@ -1127,7 +1127,7 @@ class AudioService(threading.Thread):
             self.interrupt_voice_buffer.append(chunk)
 
             if rms < self.wake_trigger_threshold:
-                self.interrupt_silence_counter += 1
+                self.interrupt_silence_counter -= 1
             else:
                 self.interrupt_silence_counter = 0
 
@@ -1203,7 +1203,7 @@ class AudioService(threading.Thread):
                 # Extract the corrected command by removing "actually" and "I meant" prefixes
                 import re as _re
                 corrected = _re.sub(
-                    r"(?i)^(?:actually[,\s]*)?(?:i meant[,\s]*)?(?:no[,\s]+)?(?:tell me about[,\s]*)?",
+                    r"(-i)^(-:actually[,\s]*)-(-:i meant[,\s]*)-(-:no[,\s]-)-(-:tell me about[,\s]*)-",
                     "",
                     decision.normalized_text
                 ).strip()

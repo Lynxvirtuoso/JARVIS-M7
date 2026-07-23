@@ -72,8 +72,20 @@ class SpeechEngine(threading.Thread):
     def start_request(self, request_id: str) -> None:
         self.begin_request(request_id)
 
+    def begin_stream(self, request_id: str) -> None:
+        self.begin_request(request_id)
+
+    def enqueue_stream_sentence(self, text: str, *, request_id: str) -> None:
+        self.speak(text, request_id=request_id, standalone=False)
+
+    def finish_stream(self, request_id: str) -> None:
+        self.mark_producer_finished(request_id)
+
     def enqueue_sentence(self, text: str, *, request_id: str | None = None) -> None:
-        self.speak(text, request_id=request_id, begin_request=False)
+        self.speak(text, request_id=request_id, standalone=False)
+
+    def speak_standalone(self, text: str, *, request_id: str | None = None) -> str:
+        return self.speak(text, request_id=request_id, standalone=True)
 
     def mark_producer_finished(self, request_id: str) -> None:
         with self._lifecycle_lock:
@@ -89,6 +101,8 @@ class SpeechEngine(threading.Thread):
             state = self._lifecycles.get(request_id)
             if state:
                 state.cancelled = True
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+        streaming_tts_queue.cancel_request(request_id)
 
     def _check_and_emit_speech_ended(self, request_id: Optional[str] = None):
         with self._lifecycle_lock:
@@ -129,35 +143,46 @@ class SpeechEngine(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Bus speech_ended emission skipped (bus object invalidated): {e}")
 
-    def speak(self, text, request_id: str | None = None, begin_request: bool = True):
+    def speak(self, text, request_id: str | None = None, standalone: bool = True, begin_request: bool | None = None) -> str:
         from services.tts.sanitizer import sanitize_for_tts
         from core.telemetry import pipeline_timer, TelemetryContext
         import uuid
         sanitized = sanitize_for_tts(text) if text else ""
+
+        should_begin = standalone if begin_request is None else begin_request
+        req_id_str = request_id or f"sys-{uuid.uuid4().hex[:8]}"
+
         if not sanitized:
-            return
+            if should_begin:
+                self.begin_request(req_id_str)
+            if standalone:
+                self.mark_producer_finished(req_id_str)
+            return req_id_str
 
         ctx = pipeline_timer.get_thread_context()
         if ctx is None:
-            req_id = request_id or f"sys-{uuid.uuid4().hex[:8]}"
-            ctx = TelemetryContext(sanitized, request_id=req_id)
-        elif request_id:
-            ctx.request_id = request_id
+            ctx = TelemetryContext(sanitized, request_id=req_id_str)
+        else:
+            ctx.request_id = req_id_str
 
-        req_id_str = getattr(ctx, "request_id", None)
-        if req_id_str:
-            if begin_request:
-                self.begin_request(req_id_str)
-            else:
-                with self._lifecycle_lock:
-                    if req_id_str not in self._lifecycles:
-                        self._lifecycles[req_id_str] = SpeechLifecycleState(request_id=req_id_str)
-
+        from services.tts.streaming_tts_queue import streaming_tts_queue
+        if should_begin or (streaming_tts_queue.active_request_id != req_id_str):
+            self.begin_request(req_id_str)
+        else:
             with self._lifecycle_lock:
-                if req_id_str in self._lifecycles:
-                    self._lifecycles[req_id_str].queued_text_count += 1
+                if req_id_str not in self._lifecycles:
+                    self._lifecycles[req_id_str] = SpeechLifecycleState(request_id=req_id_str)
+
+        with self._lifecycle_lock:
+            if req_id_str in self._lifecycles:
+                self._lifecycles[req_id_str].queued_text_count += 1
 
         self.queue.put((sanitized, ctx))
+
+        if standalone:
+            self.mark_producer_finished(req_id_str)
+
+        return req_id_str
 
     def stop(self):
         self.queue.put((None, None))
@@ -185,6 +210,7 @@ class SpeechEngine(threading.Thread):
 
     def _synthesis_loop(self):
         """Background thread to pre-synthesize text to audio chunks as they arrive in the queue."""
+        from services.tts.streaming_tts_queue import streaming_tts_queue
         while True:
             try:
                 item = self.queue.get(timeout=1.0)
@@ -201,6 +227,17 @@ class SpeechEngine(threading.Thread):
                     continue
 
                 req_id = getattr(ctx, "request_id", None)
+
+                # Check 1: Discard if request is stale before starting synthesis
+                if req_id and not streaming_tts_queue.is_request_active(req_id):
+                    logger.info(f"[PIPELINE] Discarding stale text chunk before synthesis: '{text[:30]}...' for req {req_id[:8]}")
+                    with self._lifecycle_lock:
+                        if req_id in self._lifecycles:
+                            st = self._lifecycles[req_id]
+                            st.queued_text_count = max(0, st.queued_text_count - 1)
+                    self.queue.task_done()
+                    continue
+
                 if req_id:
                     with self._lifecycle_lock:
                         if req_id in self._lifecycles:
@@ -208,8 +245,8 @@ class SpeechEngine(threading.Thread):
                             st.queued_text_count = max(0, st.queued_text_count - 1)
                             st.synthesis_active += 1
 
-                # If we are already interrupted, skip synthesis
-                if tts_manager.interrupt_flag.is_set():
+                # Check 2: Discard if interrupted/stale right before TTS call
+                if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
                     if req_id:
                         with self._lifecycle_lock:
                             if req_id in self._lifecycles:
@@ -222,8 +259,9 @@ class SpeechEngine(threading.Thread):
                     logger.info(f"[PIPELINE] Synthesizing chunk in background: {text[:30]}...")
                     result = tts_manager.synthesize(text)
 
-                    if tts_manager.interrupt_flag.is_set():
-                        logger.info(f"[PIPELINE] Discarding synthesized chunk due to interrupt: {text[:30]}...")
+                    # Check 3: Discard post-synthesis if request was cancelled while generating
+                    if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
+                        logger.info(f"[PIPELINE] Discarding synthesized chunk (stale/interrupted post-synthesis): {text[:30]}...")
                         if req_id:
                             with self._lifecycle_lock:
                                 if req_id in self._lifecycles:
@@ -258,6 +296,7 @@ class SpeechEngine(threading.Thread):
     def run(self):
         import pythoncom
         pythoncom.CoInitialize()
+        from services.tts.streaming_tts_queue import streaming_tts_queue
 
         if SAPI_AVAILABLE:
             try:
@@ -289,8 +328,9 @@ class SpeechEngine(threading.Thread):
                             st = self._lifecycles[req_id]
                             st.queued_audio_count = max(0, st.queued_audio_count - 1)
 
-                # Check interrupt flag before starting playback
-                if tts_manager.interrupt_flag.is_set():
+                # Check 4: Discard audio before hardware playback if request is stale/cancelled
+                if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
+                    logger.info(f"[PIPELINE] Skipping playback for stale request {req_id[:8] if req_id else 'None'}")
                     self.audio_queue.task_done()
                     if req_id:
                         self._check_and_emit_speech_ended(req_id)
@@ -333,7 +373,9 @@ class SpeechEngine(threading.Thread):
                 self.current_spoken_sentence = ""
                 self.speech_end_time = time.time()
                 self.audio_queue.task_done()
-                if req_id:
+
+                # Post-playback check: only emit speech_ended if request remains active
+                if req_id and streaming_tts_queue.is_request_active(req_id):
                     self._check_and_emit_speech_ended(req_id)
             except queue.Empty:
                 pass
@@ -392,14 +434,32 @@ class SpeechService:
     def cancel_request(self, request_id: str):
         self.engine.cancel_request(request_id)
 
-    def speak(self, text, request_id: str | None = None, begin_request: bool = True):
+    def begin_stream(self, request_id: str):
+        self.engine.begin_stream(request_id)
+
+    def enqueue_stream_sentence(self, text: str, *, request_id: str):
+        self.engine.enqueue_stream_sentence(text, request_id=request_id)
+
+    def finish_stream(self, request_id: str):
+        self.engine.finish_stream(request_id)
+
+    def speak_standalone(self, text: str, *, request_id: str | None = None) -> str:
+        logger.info(f"Speaking standalone: {text}")
+        from core.telemetry import pipeline_timer
+        pipeline_timer.log_event(f"TTS request sent: {text[:30]}...")
+        if self.engine.queue.empty() and self.engine.audio_queue.empty():
+            from services.tts.provider_manager import tts_manager
+            tts_manager.clear_interrupt()
+        return self.engine.speak_standalone(text, request_id=request_id)
+
+    def speak(self, text, request_id: str | None = None, standalone: bool = True, begin_request: bool | None = None) -> str:
         logger.info(f"Speaking: {text}")
         from core.telemetry import pipeline_timer
         pipeline_timer.log_event(f"TTS request sent: {text[:30]}...")
         if self.engine.queue.empty() and self.engine.audio_queue.empty():
             from services.tts.provider_manager import tts_manager
             tts_manager.clear_interrupt()
-        self.engine.speak(text, request_id=request_id, begin_request=begin_request)
+        return self.engine.speak(text, request_id=request_id, standalone=standalone, begin_request=begin_request)
 
     def clear_queue(self):
         self.engine.clear_queue()
