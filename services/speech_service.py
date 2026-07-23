@@ -28,6 +28,8 @@ class SpeechEngine(threading.Thread):
         self.audio_queue = queue.Queue() # Pre-synthesized audio queue
         self.sapi_voice = None
         self.is_speaking = False
+        self.current_spoken_sentence = ""
+        self.recent_spoken_sentences = []
         self.speech_end_time = 0.0  # timestamp when last speech ended
         self.warned_kokoro = False
         self.warned_piper = False
@@ -44,9 +46,13 @@ class SpeechEngine(threading.Thread):
         return (time.time() - self.speech_end_time) < (cooldown_ms / 1000.0)
 
     def speak(self, text):
+        from services.tts.sanitizer import sanitize_for_tts
         from core.telemetry import pipeline_timer
+        sanitized = sanitize_for_tts(text) if text else ""
+        if not sanitized:
+            return
         ctx = pipeline_timer.get_thread_context()
-        self.queue.put((text, ctx))
+        self.queue.put((sanitized, ctx))
 
     def stop(self):
         self.queue.put((None, None))
@@ -152,6 +158,11 @@ class SpeechEngine(threading.Thread):
                     continue
                 
                 self.is_speaking = True
+                self.current_spoken_sentence = text
+                self.recent_spoken_sentences.append(text)
+                if len(self.recent_spoken_sentences) > 5:
+                    self.recent_spoken_sentences.pop(0)
+
                 bus.speech_started.emit(text)
                 
                 from core.telemetry import pipeline_timer
@@ -163,16 +174,19 @@ class SpeechEngine(threading.Thread):
                 tts_manager.play_result(result)
                 
                 self.is_speaking = False
+                self.current_spoken_sentence = ""
                 self.speech_end_time = time.time()
-                bus.speech_ended.emit()
                 self.audio_queue.task_done()
+                if self.audio_queue.empty() and self.queue.empty():
+                    bus.speech_ended.emit()
             except queue.Empty:
                 pass
             except Exception as e:
                 logger.error(f"Error in speech playback loop: {e}", exc_info=True)
                 self.is_speaking = False
                 self.speech_end_time = time.time()
-                bus.speech_ended.emit()
+                if self.audio_queue.empty() and self.queue.empty():
+                    bus.speech_ended.emit()
 
 # Global speech service manager
 class SpeechService:
@@ -191,6 +205,14 @@ class SpeechService:
     @property
     def is_speaking(self):
         return self.engine.is_speaking
+
+    @property
+    def current_spoken_sentence(self):
+        return self.engine.current_spoken_sentence
+
+    @property
+    def recent_spoken_sentences(self):
+        return self.engine.recent_spoken_sentences
 
     @property
     def tts_cooldown_active(self):

@@ -6,8 +6,8 @@ from core.logger import logger
 from core.config import config
 
 class TelegramBotService(QThread):
-    message_received = pyqtSignal(str, int)  # text, chat_id
-    callback_received = pyqtSignal(str, int) # callback_data, chat_id
+    message_received = pyqtSignal(str, object)  # text, chat_id
+    callback_received = pyqtSignal(str, object) # callback_data, chat_id
 
     def __init__(self, engine):
         super().__init__()
@@ -59,6 +59,7 @@ class TelegramBotService(QThread):
                     continue
 
                 data = response.json()
+                logger.info(f"Telegram Bot poll response: {data}")
                 if not data.get("ok"):
                     logger.warning(f"Telegram API response not OK: {data.get('description')}")
                     time.sleep(5)
@@ -91,7 +92,7 @@ class TelegramBotService(QThread):
                             self.callback_received.emit(callback_data, chat_id)
                         continue
 
-                    # 2. Handle normal text messages
+                    # 2. Handle normal messages (text or voice)
                     message = update.get("message")
                     if not message:
                         continue
@@ -105,9 +106,36 @@ class TelegramBotService(QThread):
 
                     chat = message.get("chat", {})
                     chat_id = chat.get("id")
-                    text = message.get("text", "").strip()
 
+                    # Handle voice notes
+                    voice = message.get("voice")
+                    if voice:
+                        file_id = voice.get("file_id")
+                        ogg_bytes = self.download_voice_note(file_id)
+                        if ogg_bytes:
+                            try:
+                                from services.stt.provider_manager import stt_manager
+                                transcription_result = stt_manager.transcribe(ogg_bytes, audio_format="ogg")
+                                text = transcription_result.text.strip() if transcription_result else ""
+                                if text:
+                                    self.send_message(chat_id, f"I heard: \"{text}\"")
+                                    if hasattr(self, "engine"):
+                                        self.engine.last_telegram_was_voice = True
+                                    self.message_received.emit(text, chat_id)
+                                else:
+                                    self.send_message(chat_id, "Could not transcribe audio.")
+                            except Exception as e:
+                                logger.error(f"Error transcribing Telegram voice note: {e}", exc_info=True)
+                                self.send_message(chat_id, "Error occurred during transcription.")
+                        else:
+                            self.send_message(chat_id, "Failed to download voice note.")
+                        continue
+
+                    # Handle text messages
+                    text = message.get("text", "").strip()
                     if text:
+                        if hasattr(self, "engine"):
+                            self.engine.last_telegram_was_voice = False
                         self.message_received.emit(text, chat_id)
 
             except requests.RequestException as e:
@@ -154,6 +182,7 @@ class TelegramBotService(QThread):
     def send_message(self, chat_id: int, text: str):
         if not self.bot_token:
             return
+        logger.info(f"Sending text message to chat {chat_id}: {text!r}")
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": chat_id,
@@ -286,6 +315,40 @@ class TelegramBotService(QThread):
                 requests.post(url, data=data, files=files, timeout=20)
         except Exception as e:
             logger.error(f"Failed to send document via Telegram: {e}")
+
+    def download_voice_note(self, file_id: str) -> bytes:
+        if not self.bot_token:
+            return None
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getFile"
+            res = requests.get(url, params={"file_id": file_id}, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("ok"):
+                    file_path = data["result"]["file_path"]
+                    download_url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
+                    file_res = requests.get(download_url, timeout=20)
+                    if file_res.status_code == 200:
+                        return file_res.content
+        except Exception as e:
+            logger.error(f"Failed to download voice note: {e}")
+        return None
+
+    def send_voice(self, chat_id: int, voice_bytes: bytes, caption: str = ""):
+        if not self.bot_token:
+            return
+        logger.info(f"Sending voice message of size {len(voice_bytes)} bytes to chat {chat_id}: caption={caption!r}")
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendVoice"
+        try:
+            files = {"voice": ("voice.ogg", voice_bytes, "audio/ogg")}
+            data = {
+                "chat_id": chat_id,
+                "caption": caption,
+                "parse_mode": "HTML"
+            }
+            requests.post(url, data=data, files=files, timeout=20)
+        except Exception as e:
+            logger.error(f"Failed to send voice via Telegram: {e}")
 
     def stop(self):
         self.running = False

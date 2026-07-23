@@ -62,6 +62,30 @@ class DatabaseManager:
                     )
                 """)
                 
+                # Ragas table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ragas (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        category TEXT NOT NULL,
+                        tradition TEXT,
+                        parent_id INTEGER,
+                        FOREIGN KEY (parent_id) REFERENCES ragas(id)
+                    )
+                """)
+                
+                # Raga notes table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS raga_notes (
+                        raga_id INTEGER,
+                        scale_type TEXT NOT NULL,
+                        note_position INTEGER NOT NULL,
+                        note TEXT NOT NULL,
+                        PRIMARY KEY (raga_id, scale_type, note_position),
+                        FOREIGN KEY (raga_id) REFERENCES ragas(id) ON DELETE CASCADE
+                    )
+                """)
+                
                 conn.commit()
                 logger.info("SQLite database initialized successfully.")
                 
@@ -100,6 +124,12 @@ class DatabaseManager:
                 self.set_setting_default("voice_wake_enabled", "1")
                 self.set_setting_default("clap_wake_enabled", "1")
                 
+                # Brain & Ollama Default Settings
+                self.set_setting_default("ollama_model", "qwen3:1.7b")
+                self.set_setting_default("brain_mode", "smart_auto")
+                self.set_setting_default("ollama_think", "false")
+                self.set_setting_default("ollama_num_ctx", "2048")
+
                 # Migration: if whisper_device is "auto", migrate to "cpu" and "int8"
                 with self.get_connection() as conn:
                     cursor = conn.cursor()
@@ -109,6 +139,14 @@ class DatabaseManager:
                         logger.info("Migrating whisper_device setting from 'auto' to 'cpu'.")
                         cursor.execute("UPDATE settings SET value = 'cpu' WHERE key = 'whisper_device'")
                         cursor.execute("UPDATE settings SET value = 'int8' WHERE key = 'whisper_compute_type'")
+                        conn.commit()
+
+                    # Migration: ollama_model qwen2.5:1.5b or empty -> qwen3:1.7b
+                    cursor.execute("SELECT value FROM settings WHERE key = 'ollama_model'")
+                    row = cursor.fetchone()
+                    if not row or row[0] is None or str(row[0]).strip() == "" or str(row[0]).strip() == "qwen2.5:1.5b":
+                        logger.info("Migrating ollama_model setting to 'qwen3:1.7b'.")
+                        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ollama_model', 'qwen3:1.7b')")
                         conn.commit()
                 
         except Exception as e:
@@ -223,6 +261,15 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             logger.error(f"Database error writing cooldown: {e}")
+
+    def remove_cooldown(self, key):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cooldowns WHERE key = ?", (key,))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Database error removing cooldown '{key}': {e}")
 
     def get_all_routines(self):
         try:

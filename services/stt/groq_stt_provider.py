@@ -59,6 +59,7 @@ class GroqSTTProvider(STTProvider):
             data["language"] = language
         if initial_prompt:
             data["prompt"] = initial_prompt
+            logger.info(f"[DEBUG GROQ PROMPT] Sending initial_prompt to Groq: {initial_prompt!r}")
 
         logger.info(f"Requesting Groq STT transcription (model={stt_model})...")
         response = requests.post(url, headers=headers, files=files, data=data, timeout=20)

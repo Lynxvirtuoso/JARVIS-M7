@@ -46,6 +46,11 @@ class TTSProviderManager:
         logger.info("TTS interrupt triggered. Stopping all speech playback.")
         self.interrupt_flag.set()
         try:
+            from services.tts.streaming_tts_queue import streaming_tts_queue
+            streaming_tts_queue.cancel_active_request()
+        except Exception as e:
+            logger.error(f"Failed to cancel streaming TTS queue: {e}")
+        try:
             from services.speech_service import speech
             speech.clear_queue()
         except Exception as e:

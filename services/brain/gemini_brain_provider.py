@@ -47,16 +47,22 @@ class GeminiBrainProvider(BrainProvider):
         
         if not self.client:
             return BrainResult(
-                text=f"I am currently offline as the Gemini API key is missing. Please configure it in settings, {salutation}.",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error="Gemini API key is missing",
+                error_type="missing_api_key"
             )
 
         from services.gemini_quota_manager import gemini_quota_manager
         if not gemini_quota_manager.is_available(self.model_name, "brain"):
             remaining = gemini_quota_manager.get_remaining_seconds(self.model_name, "brain")
             return BrainResult(
-                text=f"Gemini is cooling down, Sir. Please try again in a moment ({remaining}s remaining).",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error=f"Gemini is cooling down ({remaining}s remaining)",
+                error_type="cooldown"
             )
             
         try:
@@ -71,35 +77,39 @@ class GeminiBrainProvider(BrainProvider):
             sys_instruction += format_user_facts_for_prompt()
             sys_instruction += get_uncertainty_guardrail()
             
-            contents = []
+            formatted_contents = []
             if history:
                 for h in history:
-                    role = "user" if h["role"] == "user" else "model"
-                    contents.append(
+                    role = "user" if h.get("role") == "user" else "model"
+                    formatted_contents.append(
                         types.Content(
                             role=role,
-                            parts=[types.Part.from_text(text=h["content"])]
+                            parts=[types.Part.from_text(text=h.get("content", ""))]
                         )
                     )
             
-            contents.append(
+            formatted_contents.append(
                 types.Content(
                     role="user",
                     parts=[types.Part.from_text(text=text)]
                 )
             )
+
+            req_config = types.GenerateContentConfig(
+                system_instruction=sys_instruction,
+                temperature=0.7,
+                max_output_tokens=300
+            )
             
+            logger.info(f"Thinking via Brain provider: {self.provider_id} (model={self.model_name})")
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=sys_instruction,
-                    temperature=0.7
-                )
+                contents=formatted_contents,
+                config=req_config
             )
             
             reply = response.text.strip()
-            return BrainResult(text=reply, provider=self.provider_id)
+            return BrainResult(text=reply, provider=self.provider_id, success=True)
             
         except Exception as e:
             error_text = str(e)
@@ -108,13 +118,19 @@ class GeminiBrainProvider(BrainProvider):
                 retry_seconds = extract_retry_delay_seconds(error_text)
                 gemini_quota_manager.set_cooldown(self.model_name, retry_seconds, "brain")
                 return BrainResult(
-                    text="Gemini quota is temporarily exhausted, Sir. I will use offline controls until it resets.",
-                    provider=self.provider_id
+                    text="",
+                    provider=self.provider_id,
+                    success=False,
+                    error="Gemini quota is temporarily exhausted",
+                    error_type="quota_exceeded"
                 )
             logger.error(f"Gemini GenAI execution error: {e}", exc_info=True)
             return BrainResult(
-                text=f"I encountered a communication issue, {salutation}. The details are logged in the console.",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error=str(e),
+                error_type="execution_error"
             )
 
     def think_stream(self, text: str, history: list[dict] = None):

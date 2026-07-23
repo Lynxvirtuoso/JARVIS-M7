@@ -1,122 +1,641 @@
+"""
+ui/hud/window.py
+Main HUD window — Stage 2 layout manager changes:
+  1. Integrates DetachableModule wiring for all panels (SYSTEM, CONTACTS,
+     TELEMETRY, PROVIDERS, CORE OUTPUT, ROUTINES, DEV CONSOLE).
+  2. Double-click panel title bar → detaches as a floating window.
+  3. Window restores panel floating layout from SQLite settings at startup.
+  4. Includes promoted ConsoleWidget.
+"""
 import sys
-import math
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLineEdit, QLabel, QPushButton, QSystemTrayIcon, QMenu,
-                             QGroupBox, QTextEdit, QPlainTextEdit, QSizePolicy, QScrollArea)
-from PyQt6.QtCore import Qt, QPoint, QPointF, QTimer, pyqtSlot
-from PyQt6.QtGui import (QColor, QFont, QIcon, QPainter, QBrush, QAction,
-                         QPen, QKeySequence, QShortcut, QTextCursor, QLinearGradient)
+import time
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QStackedWidget,
+    QVBoxLayout, QHBoxLayout,
+    QScrollArea, QSizePolicy,
+    QLabel, QPushButton,
+    QSystemTrayIcon, QMenu,
+    QGraphicsOpacityEffect,
+    QApplication,
+)
+from PyQt6.QtCore  import Qt, QPoint, QTimer, QVariantAnimation, pyqtSlot
+from PyQt6.QtGui   import (QColor, QIcon, QPainter, QBrush, QAction,
+                            QPen, QKeySequence, QShortcut, QPixmap)
 
 from core.event_bus import bus
-from core.logger import logger
-from core.config import config
-from ui.hud.core_widget import AICoreWidget
-from ui.hud.waveform import WaveformWidget
-from ui.hud.stats_widget import StatsWidget
+from core.logger    import logger
+from core.config    import config
 
-# ──────────────────────────────────────────────────────────
-# Design constants — exact match to approved mockup
-# ──────────────────────────────────────────────────────────
-BG_DARK     = "rgba(5, 11, 20, 235)"
-BORDER_DIM  = "rgba(34, 211, 238, 60)"
-BORDER_MED  = "rgba(34, 211, 238, 120)"
-BORDER_FULL = "#22d3ee"
-ACCENT_CYAN = "#22d3ee"
-ACCENT_TEAL = "#5eead4"
-TEXT_DIM    = "#94a3b8"
-TEXT_BRIGHT = "#e2e8f0"
-FONT_MONO   = "Consolas"
-
-PANEL_STYLE = f"""
-QGroupBox {{
-    background-color: rgba(5, 15, 30, 200);
-    border: 1px solid {BORDER_DIM};
-    border-radius: 4px;
-    margin-top: 14px;
-    padding: 6px 8px 8px 8px;
-    font-family: {FONT_MONO};
-    font-size: 9px;
-    font-weight: bold;
-    color: {ACCENT_CYAN};
-    letter-spacing: 2px;
-}}
-QGroupBox::title {{
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 10px;
-    padding: 0 4px;
-    color: {ACCENT_CYAN};
-}}
-"""
-
-SCROLLBAR_STYLE = f"""
-QScrollBar:vertical {{
-    border: none;
-    background: rgba(5,11,20,100);
-    width: 4px;
-    margin: 0;
-}}
-QScrollBar::handle:vertical {{
-    background: {BORDER_MED};
-    min-height: 20px;
-    border-radius: 2px;
-}}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-    border: none; background: none;
-}}
-"""
+from ui.hud.theme          import (get_hud_styling, CornerBracketOverlay,
+                                   BG_VOID, BG_PANEL, COLOR_CYAN, COLOR_CYAN_FAINT,
+                                   COLOR_TEXT_DIM, COLOR_AMBER, get_mono_family,
+                                   get_orbitron_family)
+from ui.hud.boot_widget    import BootWidget, CoreFlashOverlay
+from ui.hud.hud_layout     import TopStatusBar, ScanlineOverlay, TranscriptWidget
+from ui.hud.panels         import HUDCollapsiblePanel
+from ui.hud.dock_media_output import (ModulesDockPanel, CoreOutputLogPanel,
+                                       RoutinesDockPanel)
+from ui.hud.vision_mode    import VisionOverlayWidget
+from ui.hud.stats_widget   import StatsWidget
+from ui.hud.config_panel   import ConfigPanel
+from ui.hud.core_widget    import AICoreWidget
+from ui.hud.console        import ConsoleWidget   # promoted detachable console
+from ui.hud.music_space_widget import MusicSpaceHUDWidget
 
 
 # ──────────────────────────────────────────────────────────
-# Separator line widget
+# Mic Status Bar
 # ──────────────────────────────────────────────────────────
-class HUDSeparator(QWidget):
+class MicStatusBar(QWidget):
+    """Thin bar below TopStatusBar showing active microphone name + state."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(1)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(26)
+        self.setStyleSheet(
+            f"background-color: {BG_PANEL};"
+            f"border-bottom: 1px solid {COLOR_CYAN_FAINT};"
+        )
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(28, 0, 28, 0)
+        hl.setSpacing(6)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        gradient = QLinearGradient(0, 0, self.width(), 0)
-        gradient.setColorAt(0.0,  QColor(34, 211, 238, 0))
-        gradient.setColorAt(0.3,  QColor(34, 211, 238, 120))
-        gradient.setColorAt(0.7,  QColor(34, 211, 238, 120))
-        gradient.setColorAt(1.0,  QColor(34, 211, 238, 0))
-        painter.fillRect(self.rect(), gradient)
+        dot = QLabel("●", self)
+        dot.setStyleSheet(f"font-size: 8px; color: {COLOR_CYAN}; background: transparent;")
+        hl.addWidget(dot)
+
+        self.lbl = QLabel("MIC: DETECTING…", self)
+        self.lbl.setStyleSheet(
+            f"font-family: '{get_mono_family()}'; font-size: 9px;"
+            f"color: {COLOR_TEXT_DIM}; letter-spacing: 1px; background: transparent;"
+        )
+        hl.addWidget(self.lbl)
+        hl.addStretch()
+
+    def set_mic(self, name: str, state: str = "ACTIVE"):
+        self.lbl.setText(f"MIC: {name.upper()} — {state}")
+
+
+# ──────────────────────────────────────────────────────────
+# System Feed Log
+# ──────────────────────────────────────────────────────────
+class SystemFeedLog(HUDCollapsiblePanel):
+    """Scrolling [INFO/WARN/ERROR] timestamped feed. Fixed width PANEL_WIDTH, collapsible and detachable."""
+    MAX_LINES = 80
+
+    def __init__(self, parent=None):
+        super().__init__("SYSTEM FEED LOG", parent, module_id="system_feed_log")
+
+        self._scroll = QScrollArea(self.body)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { border: 1px solid #12303A; background: #080E13; }")
+        self._scroll.setFixedHeight(80)
+
+        self._inner = QWidget()
+        self._inner.setStyleSheet("background: #080E13;")
+        self._vbox  = QVBoxLayout(self._inner)
+        self._vbox.setContentsMargins(6, 4, 6, 4)
+        self._vbox.setSpacing(1)
+        self._vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._scroll.setWidget(self._inner)
+        self.body_layout.addWidget(self._scroll)
+
+        self._lines: list[QLabel] = []
+
+    def add_line(self, level: str, message: str):
+        ts    = time.strftime("%H:%M:%S")
+        color = COLOR_CYAN if level == "INFO" else COLOR_AMBER if level in ("WARNING", "WARN") else "#FF6B6B"
+        lbl   = QLabel(self._inner)
+        lbl.setText(
+            f'<span style="color:{color};">[{level[:4]}]</span>'
+            f'<span style="color:#3A5F6A;"> {ts} </span>'
+            f'<span style="color:#5D8A96;">{message[:90]}</span>'
+        )
+        lbl.setStyleSheet(
+            f"font-family: '{get_mono_family()}'; font-size: 9px; background: transparent;"
+        )
+        self._vbox.addWidget(lbl)
+        self._lines.append(lbl)
+
+        if len(self._lines) > self.MAX_LINES:
+            old = self._lines.pop(0)
+            self._vbox.removeWidget(old)
+            old.deleteLater()
+
+        QTimer.singleShot(30, self._scroll_bottom)
+
+    def _scroll_bottom(self):
+        vb = self._scroll.verticalScrollBar()
+        vb.setValue(vb.maximum())
+
+
+# ──────────────────────────────────────────────────────────
+# Provider Info Panel
+# ──────────────────────────────────────────────────────────
+class ProviderInfoPanel(HUDCollapsiblePanel):
+    """Shows active STT / Brain / TTS providers."""
+    def __init__(self, parent=None):
+        super().__init__("SYSTEM PROVIDERS", parent, module_id="system_providers")
+        self.add_row("STT",   "—")
+        self.add_row("BRAIN", "—")
+        self.add_row("TTS",   "—")
+
+    def update_providers(self, stt: str, brain: str, tts: str):
+        self.update_row_value("STT",   stt)
+        self.update_row_value("BRAIN", brain)
+        self.update_row_value("TTS",   tts)
 
 
 # ──────────────────────────────────────────────────────────
 # Main HUD Window
 # ──────────────────────────────────────────────────────────
 class HUDWindow(QMainWindow):
-    """
-    JARVIS M7 — Stark Industries two-column HUD.
-    Left:  Arc Reactor | Waveform | System Feed Log | Ring Gauges | Voice Input
-    Right: Core Output | System providers | Routines
-    """
     def __init__(self, settings_cb=None):
         super().__init__()
-        self.settings_cb = settings_cb
-        self.drag_position = QPoint()
-        self._dismiss_timer = QTimer(self)
-        self._dismiss_timer.setSingleShot(True)
-        self._dismiss_timer.timeout.connect(self._clear_core_output)
-        self.transcript_history = []
+        self.settings_cb         = settings_cb
+        self.drag_position       = QPoint()
+        self._hotkeys_registered = False
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.SubWindow
+            Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        # Wide two-column layout: 1000×680
-        self.resize(1000, 680)
+        self.resize(1280, 820)
         self._center_on_screen()
         self._build_ui()
+        self._connect_bus()
+        self._init_tray()
+        self._refresh_system_panel()
+        self._restore_module_layout() # restore floating layouts
+        logger.info("HUD window initialized.")
 
-        # Event bus connections
+    def _center_on_screen(self):
+        geo = self.screen().availableGeometry()
+        self.move((geo.width()  - self.width())  // 2,
+                  (geo.height() - self.height()) // 2)
+
+    def _build_ui(self):
+        self.setStyleSheet(get_hud_styling())
+
+        self.container = QWidget(self)
+        self.container.setStyleSheet(f"background-color: {BG_VOID};")
+        self.setCentralWidget(self.container)
+
+        root = QVBoxLayout(self.container)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.stack = QStackedWidget(self.container)
+        root.addWidget(self.stack)
+
+        self.boot_screen = BootWidget(self.stack)
+        self.stack.addWidget(self.boot_screen)
+
+        self.hud_screen = QWidget(self.stack)
+        self.hud_screen.setStyleSheet(f"background-color: {BG_VOID};")
+        self._opacity = QGraphicsOpacityEffect(self.hud_screen)
+        self._opacity.setOpacity(1.0)
+        self.hud_screen.setGraphicsEffect(self._opacity)
+        self._build_hud_screen()
+        self.stack.addWidget(self.hud_screen)
+
+        self.music_space_screen = MusicSpaceHUDWidget(self.stack)
+        self.stack.addWidget(self.music_space_screen)
+
+        self.scanlines     = ScanlineOverlay(self.container)
+        self.brackets      = CornerBracketOverlay(self.container)
+        self.vision        = VisionOverlayWidget(self.container)
+        self.flash_overlay = CoreFlashOverlay(self.container)
+        self.config_panel  = ConfigPanel(self.container)
+
+        for ov in (self.scanlines, self.brackets, self.vision, self.flash_overlay):
+            ov.raise_()
+        self.config_panel.raise_()
+
+        self._demo_running = False
+
+        self.boot_screen.boot_finished.connect(self.flash_overlay.start_flash)
+        self.flash_overlay.flash_midpoint.connect(
+            lambda: self.stack.setCurrentWidget(self.hud_screen)
+        )
+        self.stack.setCurrentWidget(self.boot_screen)
+
+    def _build_hud_screen(self):
+        vbox = QVBoxLayout(self.hud_screen)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        # ── Top bar ────────────────────────────────────────
+        top_row = QWidget(self.hud_screen)
+        top_row.setStyleSheet(f"background: {BG_PANEL}; border-bottom: 1px solid {COLOR_CYAN_FAINT};")
+        top_row.setFixedHeight(54)
+        top_hl = QHBoxLayout(top_row)
+        top_hl.setContentsMargins(0, 0, 12, 0)
+        top_hl.setSpacing(0)
+
+        self.top_bar = TopStatusBar(top_row)
+        top_hl.addWidget(self.top_bar, stretch=1)
+
+        cfg_btn = QPushButton("⚙", top_row)
+        cfg_btn.setFixedSize(32, 32)
+        cfg_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {COLOR_TEXT_DIM};
+                border: 1px solid {COLOR_CYAN_FAINT}; font-size: 15px;
+            }}
+            QPushButton:hover {{ color: {COLOR_CYAN}; border-color: {COLOR_CYAN}; }}
+        """)
+        cfg_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        cfg_btn.clicked.connect(self._toggle_config)
+        top_hl.addWidget(cfg_btn)
+
+        close_btn = QPushButton("✕", top_row)
+        close_btn.setFixedSize(32, 32)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {COLOR_TEXT_DIM};
+                border: 1px solid {COLOR_CYAN_FAINT}; font-size: 13px; margin-left: 6px;
+            }}
+            QPushButton:hover {{ color: #FF6B6B; border-color: #FF6B6B; }}
+        """)
+        close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        close_btn.clicked.connect(self.exit_app)
+        top_hl.addWidget(close_btn)
+        vbox.addWidget(top_row)
+
+        self.mic_bar = MicStatusBar(self.hud_screen)
+        vbox.addWidget(self.mic_bar)
+
+        # ── Body ───────────────────────────────────────────
+        body = QWidget(self.hud_screen)
+        body.setStyleSheet(f"background-color: {BG_VOID};")
+        body_row = QHBoxLayout(body)
+        body_row.setContentsMargins(18, 10, 18, 0)
+        body_row.setSpacing(0)
+
+        # LEFT COLUMN ─────────────────────────────────────
+        self.left_col = QWidget(body)
+        self.left_col.setFixedWidth(250)
+        self.left_col.setStyleSheet(f"background-color: {BG_VOID};")
+        self.left_vbox = QVBoxLayout(self.left_col)
+        self.left_vbox.setContentsMargins(0, 0, 0, 0)
+        self.left_vbox.setSpacing(10)
+        self.left_vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self.system_panel = HUDCollapsiblePanel("SYSTEM", self.left_col, module_id="system")
+        self.system_panel.add_row("STATE",         "PASSIVE_LISTEN")
+        self.system_panel.add_row("MIC LEVEL",     "0.000")
+        self.system_panel.add_row("MIC GAIN",      "0 dB")
+        self.left_vbox.addWidget(self.system_panel)
+
+        self.contacts_panel = HUDCollapsiblePanel("CONTACTS", self.left_col, module_id="contacts")
+        self.contacts_panel.add_row("CACHED",     "—")
+        self.contacts_panel.add_row("LAST MATCH", "—")
+        self.contacts_panel.add_row(
+            "TRUST GATE",
+            '<span style="color:#FFB454; font-size:13px; vertical-align:-1px;">●</span> '
+            '<b style="color:#E8F4F8;">ARMED</b>',
+            is_html=True
+        )
+        self.left_vbox.addWidget(self.contacts_panel)
+
+        self.feed_log = SystemFeedLog(self.left_col)
+        self.left_vbox.addWidget(self.feed_log)
+
+        self.stats = StatsWidget(self.left_col)
+        self.left_vbox.addWidget(self.stats)
+
+        self.left_vbox.addStretch()
+
+        body_row.addWidget(self.left_col)
+
+        # CENTER COLUMN (iris) ────────────────────────────
+        center_col = QWidget(body)
+        center_col.setStyleSheet(f"background-color: {BG_VOID};")
+        center_vbox = QVBoxLayout(center_col)
+        center_vbox.setContentsMargins(12, 0, 12, 0)
+        center_vbox.setSpacing(0)
+        center_vbox.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        self.iris = AICoreWidget(center_col)
+        center_vbox.addWidget(self.iris, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        body_row.addWidget(center_col, stretch=1)
+
+        # RIGHT COLUMN (scrollable) ───────────────────────
+        right_scroll = QScrollArea(body)
+        right_scroll.setFixedWidth(264)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        right_scroll.setStyleSheet(f"""
+            QScrollArea  {{ border: none; background: {BG_VOID}; }}
+            QScrollBar:vertical {{
+                border: none; background: #050B14; width: 3px; margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #1B4855; min-height: 14px; border-radius: 1px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none; background: none;
+            }}
+        """)
+
+        right_inner = QWidget()
+        right_inner.setStyleSheet(f"background-color: {BG_VOID};")
+        self.right_vbox = QVBoxLayout(right_inner)
+        self.right_vbox.setContentsMargins(0, 0, 4, 0)
+        self.right_vbox.setSpacing(10)
+        self.right_vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        self.telemetry_panel = HUDCollapsiblePanel("TELEMETRY", right_inner, module_id="telemetry")
+        self.telemetry_panel.add_row("STT LATENCY", "—")
+        self.telemetry_panel.add_row("NLU LATENCY", "—")
+        self.telemetry_panel.add_row("PROVIDER",    "—")
+        self.telemetry_panel.add_row("WAKE METHOD", "exact")
+        self.right_vbox.addWidget(self.telemetry_panel)
+
+        self.provider_panel = ProviderInfoPanel(right_inner)
+        self.right_vbox.addWidget(self.provider_panel)
+
+        self.dock = ModulesDockPanel(right_inner)
+        self.right_vbox.addWidget(self.dock)
+
+        self.output_log = CoreOutputLogPanel(right_inner)
+        self.right_vbox.addWidget(self.output_log)
+
+        self.routines_panel = RoutinesDockPanel(right_inner)
+        self.right_vbox.addWidget(self.routines_panel)
+
+        # Developer Console module added to right vbox
+        self.console_panel = ConsoleWidget(right_inner)
+        self.right_vbox.addWidget(self.console_panel)
+
+        self.right_vbox.addStretch()
+        right_scroll.setWidget(right_inner)
+        body_row.addWidget(right_scroll)
+
+        vbox.addWidget(body, stretch=1)
+
+        # ── Bottom bar ─────────────────────────────────────
+        bottom = QWidget(self.hud_screen)
+        bottom.setStyleSheet(f"background-color: {BG_VOID};")
+        bottom_hl = QHBoxLayout(bottom)
+        bottom_hl.setContentsMargins(18, 0, 18, 10)
+        bottom_hl.setSpacing(10)
+
+        # DEMO Button (safely in layout, avoiding z-order collision)
+        self.demo_btn = QPushButton('DEMO: "Jarvis, what\'s on screen"', bottom)
+        self.demo_btn.setFixedSize(190, 38)
+        self.demo_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-family: '{get_mono_family()}'; font-size: 9px; font-weight: bold;
+                background: #0A1218; color: {COLOR_TEXT_DIM};
+                border: 1px solid {COLOR_CYAN_FAINT}; padding: 4px;
+            }}
+            QPushButton:hover {{ color: {COLOR_CYAN}; border-color: #1B4855; }}
+        """)
+        self.demo_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.demo_btn.clicked.connect(self._trigger_vision_demo)
+        bottom_hl.addWidget(self.demo_btn)
+
+        self.transcript = TranscriptWidget(bottom)
+        self.transcript.input_box.returnPressed.connect(self.submit_command)
+        bottom_hl.addWidget(self.transcript, stretch=1)
+
+        wake_btn = QPushButton("WAKE [DEV]", bottom)
+        wake_btn.setFixedSize(92, 38)
+        wake_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-family: '{get_mono_family()}'; font-size: 10px; font-weight: bold;
+                background: transparent; color: {COLOR_CYAN};
+                border: 1px solid {COLOR_CYAN}; letter-spacing: 1px;
+            }}
+            QPushButton:hover {{ background: {COLOR_CYAN}; color: {BG_VOID}; }}
+        """)
+        wake_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        wake_btn.setToolTip("[DEV] Manually trigger voice listening mode (wake word bypass)")
+        wake_btn.clicked.connect(self.manual_wake)
+        bottom_hl.addWidget(wake_btn)
+
+        run_btn = QPushButton("RUN [DEV]", bottom)
+        run_btn.setFixedSize(92, 38)
+        run_btn.setStyleSheet(f"""
+            QPushButton {{
+                font-family: '{get_mono_family()}'; font-size: 10px; font-weight: bold;
+                background: {COLOR_CYAN}; color: {BG_VOID};
+                border: 1px solid {COLOR_CYAN}; letter-spacing: 1px;
+            }}
+            QPushButton:hover {{ background: #2BB8D4; }}
+        """)
+        run_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        run_btn.setToolTip("[DEV] Manually execute the typed command")
+        run_btn.clicked.connect(self.submit_command)
+        bottom_hl.addWidget(run_btn)
+
+        # Initialize SQLite contacts cache count telemetry
+        try:
+            from core.database import db
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM contacts")
+                count = cursor.fetchone()[0]
+                self.contacts_panel.update_row_value("CACHED", str(count))
+        except Exception:
+            self.contacts_panel.update_row_value("CACHED", "0")
+
+        vbox.addWidget(bottom)
+
+        self._module_layout_map = {
+            self.system_panel:     self.left_vbox,
+            self.contacts_panel:   self.left_vbox,
+            self.feed_log:         self.left_vbox,
+            self.stats:            self.left_vbox,
+            self.telemetry_panel:  self.right_vbox,
+            self.provider_panel:   self.right_vbox,
+            self.output_log:       self.right_vbox,
+            self.routines_panel:   self.right_vbox,
+            self.console_panel:    self.right_vbox,
+        }
+        for mod, layout in self._module_layout_map.items():
+            mod.detached.connect(lambda m=mod: self._on_module_detached(m))
+            mod.reattached.connect(lambda m=mod: self._on_module_reattached(m))
+
+    # ── Detachable module layout actions ─────────────────
+    def _on_module_detached(self, module):
+        layout = self._module_layout_map[module]
+        layout.removeWidget(module)
+        module.setParent(None)
+
+    def _on_module_reattached(self, module):
+        layout = self._module_layout_map[module]
+        if layout == self.left_vbox:
+            # Map left column order: system (0), contacts (1), feed_log (2), stats (3)
+            if module == self.system_panel:
+                self.left_vbox.insertWidget(0, module)
+            elif module == self.contacts_panel:
+                idx = 1 if self.system_panel.parent() is not None else 0
+                self.left_vbox.insertWidget(idx, module)
+            elif module == self.feed_log:
+                idx = 0
+                if self.system_panel.parent() is not None: idx += 1
+                if self.contacts_panel.parent() is not None: idx += 1
+                self.left_vbox.insertWidget(idx, module)
+            elif module == self.stats:
+                idx = 0
+                if self.system_panel.parent() is not None: idx += 1
+                if self.contacts_panel.parent() is not None: idx += 1
+                if self.feed_log.parent() is not None: idx += 1
+                self.left_vbox.insertWidget(idx, module)
+        else:
+            # Right column: insert before the stretch at the end
+            layout.insertWidget(layout.count() - 1 if layout.count() > 0 else 0, module)
+
+    def _restore_module_layout(self):
+        """Checks SQLite configuration for floating modules and triggers detach."""
+        try:
+            from core.database import db
+            for mod in self._module_layout_map.keys():
+                val = db.get_setting(f"hud_module_{mod.module_id}")
+                if val and val.endswith(",1"):
+                    mod.detach()
+        except Exception as e:
+            logger.warning(f"Error restoring module layouts: {e}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w, h = self.width(), self.height()
+        for ov in (self.scanlines, self.brackets, self.vision, self.flash_overlay):
+            ov.setGeometry(0, 0, w, h)
+        self.config_panel.setGeometry(w - 460, 0, 460, h)
+
+    # ── Config toggle ─────────────────────────────────────
+    def _toggle_config(self):
+        if self.config_panel.isVisible():
+            self.config_panel.close_panel()
+        else:
+            self.config_panel.open_panel()
+
+    # ── Vision demo ───────────────────────────────────────
+    def _trigger_vision_demo(self):
+        if self._demo_running:
+            return
+        self._demo_running = True
+        self.transcript.lbl_prefix.setText("COMMAND RECEIVED")
+        self.transcript.lbl_text.setText("Jarvis, what's on screen")
+        self.output_log.add_log_line("YOU", "jarvis what's on screen", is_user=True)
+        QTimer.singleShot(500,  self._fade_hud_out)
+        QTimer.singleShot(950,  self.vision.start_overlay)
+        QTimer.singleShot(4600, self._stop_vision_demo)
+
+    def _fade_hud_out(self):
+        self._anim_fade(1.0, 0.1, 450)
+
+    def _stop_vision_demo(self):
+        self.vision.stop_overlay()
+        self._anim_fade(0.1, 1.0, 550)
+        self.transcript.lbl_prefix.setText("AWAITING COMMAND")
+        reply = 'I see a laptop, notebook and coffee mug. The document reads "Q3 Roadmap — Draft."'
+        self.transcript.lbl_text.setText(reply)
+        self.output_log.add_log_line("JARVIS", reply)
+        self._demo_running = False
+
+    def _anim_fade(self, start: float, end: float, ms: int):
+        anim = QVariantAnimation(self)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.setDuration(ms)
+        anim.valueChanged.connect(self._opacity.setOpacity)
+        anim.start()
+        self._current_anim = anim
+
+    # ── Drag ──────────────────────────────────────────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = (event.globalPosition().toPoint()
+                                  - self.frameGeometry().topLeft())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+
+    # ── Tray ──────────────────────────────────────────────
+    def _init_tray(self):
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(COLOR_CYAN), 2))
+        p.setBrush(QBrush(Qt.GlobalColor.transparent))
+        p.drawEllipse(2, 2, 28, 28)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(COLOR_CYAN)))
+        p.drawEllipse(9, 9, 14, 14)
+        p.end()
+
+        self.tray_icon = QSystemTrayIcon(QIcon(pm), self)
+        menu = QMenu()
+        menu.addAction(QAction("Show JARVIS",   self, triggered=self.show))
+        menu.addAction(QAction("Configuration", self, triggered=self._toggle_config))
+        menu.addAction(QAction("Settings",      self,
+                               triggered=lambda: self.settings_cb() if self.settings_cb else None))
+        menu.addSeparator()
+        menu.addAction(QAction("Exit", self, triggered=self.exit_app))
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(
+            lambda r: (self.show(), self.raise_(), self.activateWindow())
+            if r == QSystemTrayIcon.ActivationReason.DoubleClick else None
+        )
+        self.tray_icon.show()
+
+    # ── Hotkeys ───────────────────────────────────────────
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._hotkeys_registered:
+            self._register_global_hotkeys()
+            self._hotkeys_registered = True
+
+    def _register_global_hotkeys(self):
+        QShortcut(QKeySequence("Ctrl+Alt+J"), self).activated.connect(self.manual_wake)
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd   = int(self.winId())
+            CTRL, ALT = 0x0002, 0x0001
+            for hk_id, mod, vk, desc in [
+                (1, CTRL | ALT, 0x20, "Ctrl+Alt+Space"),
+                (2, CTRL | ALT, 0x43, "Ctrl+Alt+C"),
+                (3, CTRL | ALT, 0x48, "Ctrl+Alt+H"),
+                (4, 0,          0x13, "Pause/Break"),
+            ]:
+                user32.UnregisterHotKey(hwnd, hk_id)
+                if user32.RegisterHotKey(hwnd, hk_id, mod, vk):
+                    logger.info(f"Registered hotkey {desc} (ID {hk_id})")
+                else:
+                    logger.warning(f"Failed to register hotkey {desc}")
+        except Exception as e:
+            logger.error(f"Hotkey registration error: {e}")
+
+    def nativeEvent(self, eventType, message):
+        if eventType == b"windows_generic_MSG":
+            try:
+                import ctypes, ctypes.wintypes
+                if ctypes.wintypes.MSG.from_address(int(message)).message == 0x0312:
+                    try:
+                        from services.tts.provider_manager import tts_manager
+                        tts_manager.stop_speaking()
+                        bus.speech_interrupted.emit()
+                    except Exception as e:
+                        logger.error(f"Hotkey handler: {e}")
+                    return True, 0
+            except Exception:
+                pass
+        return False, 0
+
+    # ── Event Bus ─────────────────────────────────────────
+    def _connect_bus(self):
         bus.state_changed.connect(self.on_state_changed)
         bus.command_status.connect(self.on_command_status)
         bus.command_completed.connect(self.on_command_completed)
@@ -129,746 +648,195 @@ class HUDWindow(QMainWindow):
         bus.hide_hud_requested.connect(self.on_hide_hud_requested)
         bus.full_exit_requested.connect(self.exit_app)
         bus.console_log.connect(self._on_console_log)
+        bus.wake_detected.connect(self.on_wake_detected)
+        bus.music_space_updated.connect(self.on_music_space_updated)
 
-        self._init_tray()
-        self._refresh_routines_panel()
-        logger.info("HUD window initialized.")
-
-    # ── Layout helpers ──────────────────────────────────────
-
-    def _center_on_screen(self):
-        screen = self.screen().availableGeometry()
-        self.move(
-            (screen.width()  - self.width())  // 2,
-            (screen.height() - self.height()) // 2
-        )
-
-    def _panel_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFont(QFont(FONT_MONO, 8, QFont.Weight.Bold))
-        lbl.setStyleSheet(f"color: {ACCENT_CYAN}; letter-spacing: 2px; background: transparent;")
-        return lbl
-
-    def _mono_label(self, text: str, size: int = 9, color: str = TEXT_BRIGHT) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFont(QFont(FONT_MONO, size))
-        lbl.setStyleSheet(f"color: {color}; background: transparent;")
-        return lbl
-
-    # ── Main UI ─────────────────────────────────────────────
-
-    def _build_ui(self):
-        root = QWidget(self)
-        root.setObjectName("HUDRoot")
-        root.setStyleSheet(f"""
-            QWidget#HUDRoot {{
-                background-color: {BG_DARK};
-                border: 1px solid {BORDER_MED};
-                border-radius: 8px;
-            }}
-            QLabel {{ background: transparent; color: {TEXT_BRIGHT}; }}
-        """)
-
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(16, 14, 16, 14)
-        outer.setSpacing(8)
-
-        # ── HEADER ──
-        outer.addLayout(self._build_header())
-        outer.addWidget(self._build_mic_row())
-        outer.addWidget(HUDSeparator(self))
-
-        # ── TWO COLUMNS ──
-        cols = QHBoxLayout()
-        cols.setSpacing(14)
-
-        left = self._build_left_column()
-        right = self._build_right_column()
-
-        cols.addLayout(left, stretch=52)
-        cols.addLayout(right, stretch=48)
-
-        outer.addLayout(cols, stretch=1)
-
-        # ── COMMAND INPUT ──
-        outer.addWidget(HUDSeparator(self))
-        outer.addLayout(self._build_input_row())
-
-        self.setCentralWidget(root)
-
-    # ── HEADER ──────────────────────────────────────────────
-
-    def _build_header(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(10)
-
-        self.title_label = QLabel("JARVIS M7")
-        self.title_label.setFont(QFont(FONT_MONO, 14, QFont.Weight.Bold))
-        self.title_label.setStyleSheet(f"color: {ACCENT_CYAN}; letter-spacing: 3px;")
-
-        self.state_badge = QLabel("PASSIVE LISTENING")
-        self.state_badge.setFont(QFont(FONT_MONO, 8, QFont.Weight.Bold))
-        self.state_badge.setStyleSheet(f"""
-            color: {ACCENT_CYAN};
-            border: 1px solid {ACCENT_CYAN};
-            border-radius: 3px;
-            padding: 2px 8px;
-            letter-spacing: 1px;
-        """)
-
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
-        close_btn.setFont(QFont(FONT_MONO, 10))
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                border: 1px solid rgba(239,68,68,150);
-                border-radius: 12px;
-                color: rgba(239,68,68,200);
-            }}
-            QPushButton:hover {{
-                background: rgba(239,68,68,180);
-                color: white;
-                border-color: #ef4444;
-            }}
-        """)
-        close_btn.clicked.connect(self.hide)
-
-        row.addWidget(self.title_label)
-        row.addWidget(self.state_badge)
-        row.addStretch()
-        row.addWidget(close_btn)
-        return row
-
-    def _build_mic_row(self) -> QWidget:
-        self.mic_label = QLabel("MIC: INITIALIZING...")
-        self.mic_label.setFont(QFont(FONT_MONO, 8))
-        self.mic_label.setStyleSheet(f"color: {ACCENT_TEAL}; letter-spacing: 1px;")
-        return self.mic_label
-
-    # ── LEFT COLUMN ─────────────────────────────────────────
-
-    def _build_left_column(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        col.setSpacing(8)
-
-        # 1. Arc Reactor
-        self.ai_core = AICoreWidget(self)
-        self.ai_core.setMinimumSize(200, 200)
-        self.ai_core.setMaximumSize(260, 260)
-        col.addWidget(self.ai_core, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        # 2. Waveform
-        self.waveform = WaveformWidget(self)
-        self.waveform.setFixedHeight(36)
-        col.addWidget(self.waveform)
-
-        # 3. System Feed Log
-        col.addWidget(self._build_feed_log_panel())
-
-        # 4. Ring gauges (CPU / RAM / DISK)
-        col.addWidget(self._build_stats_panel())
-
-        # 5. Voice Input transcript
-        col.addWidget(self._build_transcript_panel(), stretch=1)
-
-        return col
-
-    def _build_feed_log_panel(self) -> QGroupBox:
-        box = QGroupBox("SYSTEM FEED LOG")
-        box.setStyleSheet(PANEL_STYLE)
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(4, 4, 4, 4)
-
-        self.feed_log = QPlainTextEdit()
-        self.feed_log.setReadOnly(True)
-        self.feed_log.setMaximumBlockCount(200)
-        self.feed_log.setFont(QFont(FONT_MONO, 8))
-        self.feed_log.setFixedHeight(68)
-        self.feed_log.setStyleSheet(f"""
-            QPlainTextEdit {{
-                background: transparent;
-                border: none;
-                color: {TEXT_DIM};
-            }}
-            {SCROLLBAR_STYLE}
-        """)
-        lay.addWidget(self.feed_log)
-        return box
-
-    def _build_stats_panel(self) -> QWidget:
-        self.stats = StatsWidget(self)
-        self.stats.setFixedHeight(110)
-        return self.stats
-
-    def _build_transcript_panel(self) -> QGroupBox:
-        box = QGroupBox("VOICE INPUT")
-        box.setStyleSheet(PANEL_STYLE)
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(4, 4, 4, 4)
-
-        self.transcript_area = QTextEdit()
-        self.transcript_area.setReadOnly(True)
-        self.transcript_area.setFont(QFont(FONT_MONO, 9))
-        self.transcript_area.setStyleSheet(f"""
-            QTextEdit {{
-                background: transparent;
-                border: none;
-                color: {TEXT_BRIGHT};
-            }}
-            {SCROLLBAR_STYLE}
-        """)
-        self.transcript_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        lay.addWidget(self.transcript_area)
-        return box
-
-    # ── RIGHT COLUMN ─────────────────────────────────────────
-
-    def _build_right_column(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        col.setSpacing(8)
-
-        # 1. JARVIS CORE OUTPUT (tall, top)
-        col.addWidget(self._build_core_output_panel(), stretch=5)
-
-        # 2. SYSTEM providers (middle)
-        col.addWidget(self._build_system_panel(), stretch=2)
-
-        # 3. ROUTINES (bottom)
-        col.addWidget(self._build_routines_panel(), stretch=2)
-
-        return col
-
-    def _build_core_output_panel(self) -> QGroupBox:
-        box = QGroupBox("JARVIS CORE OUTPUT")
-        box.setStyleSheet(PANEL_STYLE)
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(8, 6, 8, 8)
-
-        self.core_output = QTextEdit()
-        self.core_output.setReadOnly(True)
-        self.core_output.setFont(QFont(FONT_MONO, 10))
-        self.core_output.setStyleSheet(f"""
-            QTextEdit {{
-                background: transparent;
-                border: none;
-                color: {TEXT_BRIGHT};
-                line-height: 1.6;
-            }}
-            {SCROLLBAR_STYLE}
-        """)
-        self.core_output.setPlaceholderText("Awaiting response...")
-        self.core_output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        lay.addWidget(self.core_output)
-
-        # Typing cursor indicator (thin animated bar)
-        self._cursor_bar = QWidget()
-        self._cursor_bar.setFixedHeight(2)
-        self._cursor_bar.setStyleSheet(f"background: {ACCENT_TEAL}; border-radius: 1px;")
-        self._cursor_bar.setVisible(False)
-        lay.addWidget(self._cursor_bar)
-
-        return box
-
-    def _build_system_panel(self) -> QGroupBox:
-        box = QGroupBox("SYSTEM")
-        box.setStyleSheet(PANEL_STYLE)
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(8, 4, 8, 8)
-        lay.setSpacing(4)
-
-        self.stt_label  = self._mono_label("STT  : faster-whisper (local)", 9)
-        self.brain_label = self._mono_label("BRAIN: ollama (local)", 9)
-        self.tts_label  = self._mono_label("TTS  : kokoro (local)", 9)
-
-        for lbl in (self.stt_label, self.brain_label, self.tts_label):
-            lbl.setStyleSheet(f"color: {TEXT_DIM}; font-family: {FONT_MONO};")
-            lay.addWidget(lbl)
-
-        # Refresh provider info now
-        QTimer.singleShot(500, self._refresh_system_panel)
-        return box
-
-    def _build_routines_panel(self) -> QGroupBox:
-        box = QGroupBox("ROUTINES")
-        box.setStyleSheet(PANEL_STYLE)
-        self._routines_layout = QVBoxLayout(box)
-        self._routines_layout.setContentsMargins(8, 4, 8, 8)
-        self._routines_layout.setSpacing(3)
-
-        self._routines_placeholder = self._mono_label("No routines saved.", 9, TEXT_DIM)
-        self._routines_layout.addWidget(self._routines_placeholder)
-        return box
-
-    # ── COMMAND INPUT ────────────────────────────────────────
-
-    def _build_input_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        self.command_input = QLineEdit()
-        self.command_input.setPlaceholderText("Enter command, Sir...")
-        self.command_input.setFont(QFont(FONT_MONO, 10))
-        self.command_input.setStyleSheet(f"""
-            QLineEdit {{
-                background: rgba(5,15,30,200);
-                border: 1px solid {BORDER_DIM};
-                border-radius: 4px;
-                color: {TEXT_BRIGHT};
-                padding: 5px 10px;
-            }}
-            QLineEdit:focus {{ border: 1px solid {ACCENT_CYAN}; }}
-        """)
-        self.command_input.returnPressed.connect(self.submit_command)
-
-        self.wake_btn = QPushButton("WAKE")
-        self.send_btn = QPushButton("RUN")
-        for btn, color in ((self.wake_btn, "#5eead4"), (self.send_btn, ACCENT_CYAN)):
-            btn.setFont(QFont(FONT_MONO, 9, QFont.Weight.Bold))
-            btn.setFixedHeight(32)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    border: 1px solid {color};
-                    border-radius: 4px;
-                    color: {color};
-                    padding: 4px 12px;
-                }}
-                QPushButton:hover {{ background: {color}; color: #050b14; }}
-            """)
-        self.wake_btn.clicked.connect(self.manual_wake)
-        self.send_btn.clicked.connect(self.submit_command)
-
-        row.addWidget(self.command_input, stretch=1)
-        row.addWidget(self.wake_btn)
-        row.addWidget(self.send_btn)
-        return row
-
-    # ── Drag support ─────────────────────────────────────────
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton and self.drag_position:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-
-    # ── Tray ─────────────────────────────────────────────────
-
-    def _init_tray(self):
-        self.tray_icon = QSystemTrayIcon(self)
-        
-        # Create a dynamic premium cyan icon for the tray (highly compatible across platforms like Windows)
-        from PyQt6.QtGui import QPixmap
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Draw a beautiful glowing cyan outer ring representing the JARVIS core
-        painter.setPen(QPen(QColor(ACCENT_CYAN), 2))
-        painter.setBrush(QBrush(Qt.GlobalColor.transparent))
-        painter.drawEllipse(2, 2, 28, 28)
-        
-        # Inner cyan circle
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(ACCENT_CYAN)))
-        painter.drawEllipse(9, 9, 14, 14)
-        
-        painter.end()
-        self.tray_icon.setIcon(QIcon(pixmap))
-
-        tray_menu = QMenu()
-        show_action = QAction("Show JARVIS", self)
-        show_action.triggered.connect(self.show)
-        settings_action = QAction("Settings", self)
-        settings_action.triggered.connect(lambda: self.settings_cb() if self.settings_cb else None)
-        quit_action = QAction("Exit", self)
-        quit_action.triggered.connect(self.exit_app)
-
-        tray_menu.addAction(show_action)
-        tray_menu.addAction(settings_action)
-        tray_menu.addSeparator()
-        tray_menu.addAction(quit_action)
-
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.activated.connect(self._on_tray_activated)
-        self.tray_icon.show()
-
-    def _on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.show()
-            self.raise_()
-            self.activateWindow()
-
-    # ── Hotkeys ──────────────────────────────────────────────
-
-    def _register_global_hotkeys(self):
-        self.wake_shortcut = QShortcut(QKeySequence("Ctrl+Alt+J"), self)
-        self.wake_shortcut.activated.connect(self.manual_wake)
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            hwnd = int(self.winId())
-            MOD_CONTROL, MOD_SHIFT, MOD_ALT = 0x0002, 0x0004, 0x0001
-            
-            hotkeys = [
-                (1, MOD_CONTROL | MOD_ALT, 0x20, "Ctrl+Alt+Space"),
-                (2, MOD_CONTROL | MOD_ALT, 0x43, "Ctrl+Alt+C"),
-                (3, MOD_CONTROL | MOD_ALT, 0x48, "Ctrl+Alt+H"),
-                (4, 0, 0x13, "Pause/Break"),
-            ]
-            
-            for hk_id, mod, vk, desc in hotkeys:
-                user32.UnregisterHotKey(hwnd, hk_id)
-                ok = user32.RegisterHotKey(hwnd, hk_id, mod, vk)
-                if not ok:
-                    logger.warning(
-                        f"Failed to register global hotkey {desc} (ID {hk_id}). "
-                        f"This hotkey may already be claimed by another running application."
-                    )
-                else:
-                    logger.info(f"Successfully registered global hotkey {desc} (ID {hk_id}) for speech interrupt.")
-        except Exception as e:
-            logger.error(f"Error registering native global hotkeys: {e}")
-
-    def nativeEvent(self, eventType, message):
-        if eventType == b"windows_generic_MSG":
-            try:
-                import ctypes, ctypes.wintypes
-                msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == 0x0312:
-                    try:
-                        from services.tts.provider_manager import tts_manager
-                        tts_manager.stop_speaking()
-                        bus.speech_interrupted.emit()
-                    except Exception as e:
-                        logger.error(f"Error in native hotkey handler: {e}")
-                    return True, 0
-            except Exception:
-                pass
-        return False, 0
-
-    # ── Show / Hide ──────────────────────────────────────────
-
-    def showEvent(self, event):
-        self.ai_core.timer.start(33)
-        super().showEvent(event)
-
-    def hideEvent(self, event):
-        self.ai_core.timer.stop()
-        super().hideEvent(event)
-
-    # ── Data refresh helpers ─────────────────────────────────
-
+    # ── System refresh ────────────────────────────────────
     def _refresh_system_panel(self):
-        """Pull live provider names from manager objects."""
         try:
             from services.stt.provider_manager import stt_manager
-            stt_name = stt_manager.get_fallback_order()[0]
-            _STT_DISPLAY = {
-                "local_faster_whisper": "faster-whisper (local)",
-                "groq_stt": "groq (cloud)",
-                "gemini_stt": "gemini (cloud)",
-                "openai_stt": "openai (cloud)",
-                "deepgram": "deepgram (cloud)",
-            }
-            stt_text = _STT_DISPLAY.get(stt_name, stt_name)
+            stt = stt_manager.get_fallback_order()[0]
         except Exception:
-            stt_text = "unknown"
+            stt = config.get("stt_provider", "groq_stt")
+
+        _MAP = {
+            "local_faster_whisper": "faster-whisper (local)",
+            "groq_stt":             "groq (cloud)",
+            "gemini_stt":           "gemini (cloud)",
+        }
+        stt_display = _MAP.get(stt, stt)
+        self.telemetry_panel.update_row_value("PROVIDER", stt_display)
+
+        tts   = config.get("tts_provider",   "kokoro")
+        brain = config.get("brain_provider", "groq")
+        self.provider_panel.update_providers(
+            stt_display,
+            f"{brain} (cloud)",
+            f"{tts} ({'local' if tts == 'kokoro' else 'cloud'})"
+        )
 
         try:
-            from services.brain.provider_manager import brain_manager
-            brain_name = brain_manager.get_fallback_order()[0]
-            _BRAIN_DISPLAY = {
-                "ollama": f"ollama {config.get('ollama_model', 'qwen2.5:1.5b')}",
-                "groq": "groq (cloud)",
-                "gemini": "gemini (cloud)",
-            }
-            brain_text = _BRAIN_DISPLAY.get(brain_name, brain_name)
+            import pyaudio
+            pa   = pyaudio.PyAudio()
+            idx  = int(config.get("selected_microphone_index", "0") or 0)
+            info = pa.get_device_info_by_index(idx)
+            mic_name = info.get("name", "Unknown")[:50]
+            pa.terminate()
+            self.mic_bar.set_mic(mic_name)
         except Exception:
-            brain_text = "unknown"
+            self.mic_bar.set_mic("Default Microphone")
 
-        try:
-            from services.tts.provider_manager import tts_manager
-            tts_name = tts_manager.get_fallback_order()[0]
-            _TTS_DISPLAY = {
-                "kokoro": "kokoro (local)",
-                "windows_sapi": "windows sapi (local)",
-                "piper": "piper (local)",
-                "openai_tts": "openai (cloud)",
-                "cartesia": "cartesia (cloud)",
-            }
-            tts_text = _TTS_DISPLAY.get(tts_name, tts_name)
-        except Exception:
-            tts_text = "unknown"
+        self.system_panel.update_row_value("MIC GAIN",
+            f"{config.get('input_gain_boost_db', '0')} dB")
 
-        self.stt_label.setText(f"STT  : {stt_text}")
-        self.brain_label.setText(f"BRAIN: {brain_text}")
-        self.tts_label.setText(f"TTS  : {tts_text}")
-
-    def _refresh_routines_panel(self):
-        """Load saved routines and memory fact count from DB."""
-        try:
-            from core.database import db
-            routines = db.get_all_routines()
-
-            # Remove old widgets from layout
-            while self._routines_layout.count():
-                item = self._routines_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-
-            if not routines:
-                self._routines_layout.addWidget(
-                    self._mono_label("No routines saved.", 9, TEXT_DIM)
-                )
-            else:
-                for name in routines[:5]:   # show at most 5
-                    lbl = self._mono_label(f"– {name}", 9, TEXT_DIM)
-                    self._routines_layout.addWidget(lbl)
-
-            # Facts count from memory table
-            try:
-                with db.get_connection() as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT COUNT(*) FROM memory")
-                    fact_count = cur.fetchone()[0]
-            except Exception:
-                fact_count = 0
-
-            facts_lbl = self._mono_label(f"{fact_count} fact{'s' if fact_count != 1 else ''} remembered", 9, ACCENT_TEAL)
-            self._routines_layout.addWidget(facts_lbl)
-            self._routines_layout.addStretch()
-
-        except Exception as e:
-            logger.error(f"Error refreshing routines panel: {e}")
-
-    # ── Event slots ─────────────────────────────────────────
-
+    # ── Bus slots ─────────────────────────────────────────
     @pyqtSlot(str)
     def on_state_changed(self, state: str):
-        # Stop pending dismiss timers and clear text if starting a new interaction
-        if state in ("TRANSCRIBING_COMMAND", "EXECUTING_COMMAND"):
-            self._dismiss_timer.stop()
-            self._clear_core_output()
+        self.system_panel.update_row_value("STATE", state)
 
-        # Map engine state string to display badge text and core widget state
-        _BADGE = {
-            "PASSIVE_WAKE_LISTENING": ("PASSIVE LISTENING", "Passive Listening", ACCENT_CYAN),
-            "SESSION_LISTENING":      ("LISTENING",         "Listening",          "#33ff77"),
-            "TRANSCRIBING_COMMAND":   ("PROCESSING",        "Processing",          "#a855f7"),
-            "EXECUTING_COMMAND":      ("EXECUTING",         "Executing",          ACCENT_CYAN),
-            "SPEAKING_ACKNOWLEDGEMENT": ("SPEAKING",        "Speaking",           ACCENT_TEAL),
-            "SPEAKING_RESPONSE":      ("SPEAKING",          "Speaking",           ACCENT_TEAL),
-            "WAITING_FOR_CONFIRMATION": ("AWAITING CONFIRM","Executing",          "#f59e0b"),
-            "COOLDOWN":               ("COOLDOWN",          "Completed",          ACCENT_CYAN),
-            "SHUTTING_DOWN":          ("SHUTTING DOWN",     "Passive Listening",  "#ef4444"),
+        _LABEL = {
+            "PASSIVE_WAKE_LISTENING":    "PASSIVE LISTENING MODE",
+            "SESSION_LISTENING":         "LISTENING FOR COMMAND",
+            "ACTIVE_COMMAND_LISTENING":  "LISTENING FOR COMMAND",
+            "COMMAND_RECORDING":         "RECORDING COMMAND",
+            "TRANSCRIBING_COMMAND":      "PROCESSING INPUT",
+            "EXECUTING_COMMAND":         "EXECUTING COMMAND",
+            "SPEAKING_ACKNOWLEDGEMENT":  "SPEAKING",
+            "SPEAKING_RESPONSE":         "SPEAKING",
+            "WAITING_FOR_CONFIRMATION":  "AWAITING CONFIRMATION",
+            "COOLDOWN":                  "COOLDOWN",
+            "SHUTTING_DOWN":             "SHUTTING DOWN",
         }
-        badge_text, core_state, badge_color = _BADGE.get(
-            state, ("ONLINE", "Passive Listening", ACCENT_CYAN)
-        )
-        self.state_badge.setText(badge_text)
-        self.state_badge.setStyleSheet(f"""
-            color: {badge_color};
-            border: 1px solid {badge_color};
-            border-radius: 3px;
-            padding: 2px 8px;
-            letter-spacing: 1px;
-            font-family: {FONT_MONO};
-            font-size: 9px;
-            font-weight: bold;
-        """)
-        self.ai_core.set_state(core_state)
+        self.transcript.lbl_prefix.setText(_LABEL.get(state, "AWAITING COMMAND"))
 
-        # Waveform amplitude hint
-        _AMP = {
-            "SESSION_LISTENING": 30.0,
-            "SPEAKING_ACKNOWLEDGEMENT": 40.0,
-            "SPEAKING_RESPONSE": 40.0,
-            "WAITING_FOR_CONFIRMATION": 20.0,
-        }
-        self.waveform.set_amplitude(_AMP.get(state, 8.0))
+        self.iris.set_state(state)
 
     @pyqtSlot(str)
     def on_command_status(self, status: str):
-        # Command status updates go to feed log
-        self._on_console_log("INFO", status)
+        if status.startswith("space_changed:"):
+            space_name = status.split(":")[1]
+            self.top_bar.set_space_indicator(space_name)
+            if space_name == "music":
+                self.stack.setCurrentWidget(self.music_space_screen)
+            else:
+                self.stack.setCurrentWidget(self.hud_screen)
+        else:
+            self.transcript.lbl_prefix.setText(status.upper())
+
+    @pyqtSlot(dict)
+    def on_music_space_updated(self, state: dict):
+        if "raga_name" in state:
+            self.music_space_screen.set_raga(state["raga_name"], state["raga_category"], state["raga_swaras"])
+        if "playback_mode" in state:
+            self.music_space_screen.set_mode(state["playback_mode"])
+        if "tonic" in state:
+            self.music_space_screen.set_tonic(state["tonic"])
+        if "transport_status" in state:
+            self.music_space_screen.set_transport(state["transport_status"], state["tempo"], state["loop"])
+        if "sounding_idx" in state:
+            self.music_space_screen.set_sounding_index(state["sounding_idx"])
 
     @pyqtSlot(str)
     def on_transcription_completed(self, text: str):
         if text:
-            # Wrap in structured block elements with margins to prevent Qt font metric overlap
-            self.transcript_history.append(
-                f"<p style='margin: 4px 0px; line-height: 120%; color: rgba(34,211,238,0.7);'>USER: {text}</p>"
-            )
-            self._update_transcript()
+            self.transcript.lbl_text.setText(text)
 
     @pyqtSlot(str)
     def on_stream_token_received(self, chunk: str):
-        """Append streaming sentence chunks into the Core Output panel."""
-        self._dismiss_timer.stop()
-        self._cursor_bar.setVisible(True)
-        current = self.core_output.toPlainText()
-        if current:
-            self.core_output.setPlainText(current + " " + chunk)
-        else:
-            self.core_output.setPlainText(chunk)
-        # Scroll to end
-        sb = self.core_output.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        pass
 
     @pyqtSlot()
     def on_speech_ended(self):
-        # Only start the clear timer if the speech service has completely finished speaking all chunks
-        from services.speech_service import speech
-        if speech.is_speaking or not speech.engine.queue.empty() or not speech.engine.audio_queue.empty():
-            logger.info("Speech chunk ended, but speech service is still active. Postponing clear timer.")
-            return
-
-        self._cursor_bar.setVisible(False)
-        delay_ms = int(config.response_popup_dismiss_delay * 1000)
-        self._dismiss_timer.start(delay_ms)
-        # Also append JARVIS response to transcript
-        text = self.core_output.toPlainText().strip()
-        if text:
-            self.transcript_history.append(
-                f"<p style='margin: 4px 0px; line-height: 120%; color: {ACCENT_TEAL};'><b>JARVIS:</b> {text}</p>"
-            )
-            self._update_transcript()
-
-        # Print telemetry summary at the end of the entire response playback
-        from core.telemetry import pipeline_timer
-        pipeline_timer.print_summary()
+        self.output_log.finalize_response()
+        self.transcript.lbl_text.setText("Awaiting command...")
 
     @pyqtSlot()
     def on_speech_interrupted(self):
-        self._cursor_bar.setVisible(False)
-        self._clear_core_output()
-        from core.telemetry import pipeline_timer
-        pipeline_timer.print_summary()
+        self.output_log.finalize_response()
+        self.transcript.lbl_text.setText("Speech interrupted.")
 
     @pyqtSlot(bool, str)
     def on_command_completed(self, success: bool, response: str):
-        if not success:
-            self._on_console_log("WARN", f"Command failed: {response[:80]}")
+        pass
 
     @pyqtSlot(dict)
     def on_stats_updated(self, stats: dict):
+        if "stt_latency" in stats:
+            self.telemetry_panel.update_row_value("STT LATENCY",
+                                                  f"{stats['stt_latency']:.2f}s")
+        if "nlu_latency" in stats:
+            self.telemetry_panel.update_row_value("NLU LATENCY",
+                                                  f"{stats['nlu_latency']:.2f}s")
+        if "cached_contacts" in stats:
+            self.contacts_panel.update_row_value("CACHED", str(stats["cached_contacts"]))
+        if "last_contact_match" in stats:
+            self.contacts_panel.update_row_value("LAST MATCH", str(stats["last_contact_match"]))
+
         if "mic_level" in stats:
-            level = stats["mic_level"]
-            self.ai_core.set_audio_level(level)
-            if self.ai_core.state in ("Listening", "Speaking"):
-                self.waveform.set_amplitude(level * 400.0)
+            level = float(stats["mic_level"])
+            self.system_panel.update_row_value("MIC LEVEL", f"{level:.4f}")
+            self.iris.set_audio_level(level)
 
         if "active_mic" in stats:
-            mic = stats["active_mic"]
-            if len(mic) > 45:
-                mic = mic[:42] + "..."
-            self.mic_label.setText(f"MIC: {mic.upper()} — ACTIVE")
+            self.mic_bar.set_mic(str(stats["active_mic"]))
 
-    # ── HUD lifecycle ────────────────────────────────────────
+    @pyqtSlot(str)
+    def on_wake_detected(self, source: str):
+        self.telemetry_panel.update_row_value("WAKE METHOD", source)
 
     @pyqtSlot()
     def on_show_hud_requested(self):
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.show(); self.raise_(); self.activateWindow()
 
     @pyqtSlot()
     def on_hide_hud_requested(self):
         self.hide()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not getattr(self, "_hotkeys_registered", False):
-            self._register_global_hotkeys()
-            self._hotkeys_registered = True
-
-    # ── Internal helpers ─────────────────────────────────────
-
-    def _clear_core_output(self):
-        self.core_output.clear()
-
-    def _update_transcript(self):
-        if len(self.transcript_history) > 12:
-            self.transcript_history = self.transcript_history[-12:]
-        # Join paragraphs directly since block margin handles separation
-        self.transcript_area.setHtml("".join(self.transcript_history))
-        sb = self.transcript_area.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
     def _on_console_log(self, level: str, message: str):
-        _COLOR = {
-            "ERROR": "#ef4444", "WARN": "#f59e0b", "WARNING": "#f59e0b",
-            "SUCCESS": "#22c55e", "INFO": ACCENT_TEAL,
-        }
-        color = _COLOR.get(level, TEXT_DIM)
-        short = message[:120]
-        self.feed_log.appendHtml(f'<font color="{color}">[{level}]</font> <font color="{TEXT_DIM}">{short}</font>')
-        self.feed_log.moveCursor(QTextCursor.MoveOperation.End)
-
-    # ── Commands ─────────────────────────────────────────────
+        self.feed_log.add_line(level, message)
 
     def submit_command(self):
-        text = self.command_input.text().strip()
+        text = self.transcript.input_box.text().strip()
         if text:
-            self.command_input.clear()
+            self.transcript.input_box.clear()
+            self.telemetry_panel.update_row_value("WAKE METHOD", "typed")
+            bus.command_transcription_completed.emit(text)
             bus.command_received.emit(text)
 
     def manual_wake(self):
         bus.wake_detected.emit("shortcut")
 
-    # ── Exit ─────────────────────────────────────────────────
-
     def exit_app(self):
-        logger.info("Initiating clean exit sequence...")
-        try:
-            from services.audio_service import audio_service
-            audio_service.stop()
-        except Exception as e:
-            logger.error(f"Error stopping audio service: {e}")
+        logger.info("Initiating clean exit…")
+        for fn, label in [
+            (lambda: __import__("services.audio_service", fromlist=["audio_service"]).audio_service.stop(),
+             "audio_service"),
+            (lambda: __import__("services.speech_service", fromlist=["speech"]).speech.stop(),
+             "speech_service"),
+        ]:
+            try:
+                fn()
+            except Exception as e:
+                logger.error(f"Error stopping {label}: {e}")
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            hwnd = int(self.winId())
+            hwnd   = int(self.winId())
             for hk_id in [1, 2, 3, 4]:
                 user32.UnregisterHotKey(hwnd, hk_id)
         except Exception:
             pass
         try:
-            import time
-            from services.speech_service import speech
-            t0 = time.time()
-            while speech.is_speaking and (time.time() - t0) < 3.0:
-                time.sleep(0.05)
-            speech.stop()
-        except Exception as e:
-            logger.error(f"Error stopping speech: {e}")
-        try:
             self.tray_icon.hide()
         except Exception:
             pass
-        from PyQt6.QtWidgets import QApplication
         QApplication.quit()
-        import sys
         sys.exit(0)
 
 
-# ──────────────────────────────────────────────────────────
-# Separator kept for backwards compat (used by QFrameWidget ref elsewhere)
-# ──────────────────────────────────────────────────────────
-class QFrameWidget(QWidget):
-    """Thin decorative separator — kept for legacy import compatibility."""
+class HUDSeparator(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(1)
-
     def paintEvent(self, event):
-        painter = QPainter(self)
-        pen = QPen(QColor(34, 211, 238, 80))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(0, 0, self.width(), 0)
+        pass

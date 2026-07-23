@@ -778,7 +778,7 @@ class SettingsWindow(QWidget):
         self.cloud_intent_cb.setChecked(config.get("enable_cloud_intent", "false").lower() == "true")
         form_ai_api.addRow("CLOUD INTENT:", self.cloud_intent_cb)
         self.intent_prov_combo = QComboBox(self)
-        self.intent_prov_combo.addItems(["none", "gemini", "openai"])
+        self.intent_prov_combo.addItems(["none", "groq", "openai"])
         self.intent_prov_combo.setCurrentText(config.get("intent_provider", "none"))
         form_ai_api.addRow("INTENT PROVIDER:", self.intent_prov_combo)
         self.ai_api_gemini_edit = QLineEdit(self)
@@ -836,6 +836,32 @@ class SettingsWindow(QWidget):
         form_ai_api.addRow(self.test_openai_tts_btn)
         
         self.tabs.addTab(tab_ai_api, "AI / API")
+
+        # --- TAB: PHONE BRIDGE ---
+        tab_phone = QWidget()
+        form_phone = QFormLayout(tab_phone)
+        form_phone.setContentsMargins(15, 15, 15, 15)
+        form_phone.setSpacing(12)
+        
+        self.phone_ip_edit = QLineEdit(self)
+        self.phone_ip_edit.setText(config.get("phone_ip", ""))
+        self.phone_ip_edit.setPlaceholderText("e.g. 192.168.1.15")
+        form_phone.addRow("PHONE IP:", self.phone_ip_edit)
+        
+        # Generate a random token on first setup if not already in config
+        current_token = config.get("phone_call_token", "")
+        if not current_token:
+            import secrets
+            current_token = secrets.token_hex(16)
+            config.set("phone_call_token", current_token)
+            
+        self.phone_token_edit = QLineEdit(self)
+        self.phone_token_edit.setText(current_token)
+        self.phone_token_edit.setPlaceholderText("Authentication Secret Token")
+        form_phone.addRow("BRIDGE TOKEN:", self.phone_token_edit)
+        
+        self.tabs.addTab(tab_phone, "PHONE BRIDGE")
+
         # --- TAB 5: APPS & ACTIONS ---
         tab_apps = QWidget()
         vbox_apps = QVBoxLayout(tab_apps)
@@ -1435,9 +1461,15 @@ class SettingsWindow(QWidget):
         if selected_mic:
             config.set("mic_device_name", selected_mic.get("name"))
             config.set("mic_device_backend", selected_mic.get("backend"))
+            # Extract index from currentText "[idx] ..."
+            mic_text = self.mic_combo.currentText()
+            if mic_text.startswith("["):
+                idx = mic_text.split("]")[0].replace("[", "").strip()
+                config.set("selected_microphone_index", idx)
         else:
             config.set("mic_device_name", "")
             config.set("mic_device_backend", "")
+            config.set("selected_microphone_index", "0")
             
         config.set("input_gain_boost_db", str(self.gain_slider.value()))
         
@@ -1461,6 +1493,10 @@ class SettingsWindow(QWidget):
         
         config.set("home_assistant_url", self.hass_url_edit.text().strip())
         config.set("home_assistant_token", self.hass_token_edit.text().strip())
+        
+        # Phone Bridge Settings
+        config.set("phone_ip", self.phone_ip_edit.text().strip())
+        config.set("phone_call_token", self.phone_token_edit.text().strip())
         
         logger.info("Configuration parameters saved to database.")
         

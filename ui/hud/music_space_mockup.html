@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS M7 - Music Space HUD Mockup</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-void: #050708;
+            --bg-panel: #0A1218;
+            --bg-panel-solid: #0D1B22;
+            --color-cyan: #4FE3FF;
+            --color-cyan-dim: #1B4855;
+            --color-cyan-faint: #12303A;
+            --color-amber: #FFB454;
+            --color-amber-dim: #5c421e;
+            --color-amber-faint: #2b1d0a;
+            --color-text: #E8F4F8;
+            --color-text-dim: #5D8A96;
+            --glow-cyan: 0 0 15px rgba(79, 227, 255, 0.4);
+            --glow-amber: 0 0 15px rgba(255, 180, 84, 0.4);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-void);
+            color: var(--color-text);
+            font-family: 'JetBrains Mono', monospace;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Scanlines Overlay */
+        .scanlines {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(
+                rgba(79, 227, 255, 0.03) 50%, 
+                rgba(0, 0, 0, 0) 50%
+            ), linear-gradient(
+                90deg,
+                rgba(79, 227, 255, 0.01),
+                rgba(0, 0, 0, 0)
+            );
+            background-size: 100% 4px, 6px 100%;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        /* HUD Main Window Container */
+        .hud-window {
+            width: 1200px;
+            height: 760px;
+            background-color: var(--bg-panel);
+            border: 1px solid var(--color-cyan-faint);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), inset 0 0 40px rgba(79, 227, 255, 0.05);
+        }
+
+        /* Corner Brackets */
+        .hud-window::before, .hud-window::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+        }
+        .hud-window::before {
+            top: -1px;
+            left: -1px;
+            border-top: 2px solid var(--color-cyan);
+            border-left: 2px solid var(--color-cyan);
+            border-top-left-radius: 12px;
+        }
+        .hud-window::after {
+            bottom: -1px;
+            right: -1px;
+            border-bottom: 2px solid var(--color-cyan);
+            border-right: 2px solid var(--color-cyan);
+            border-bottom-right-radius: 12px;
+        }
+
+        /* Header */
+        header {
+            height: 60px;
+            border-bottom: 1px solid var(--color-cyan-faint);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 30px;
+            background-color: rgba(5, 7, 8, 0.4);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .back-indicator {
+            font-size: 14px;
+            color: var(--color-text-dim);
+            letter-spacing: 1px;
+        }
+
+        .space-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 16px;
+            font-weight: bold;
+            color: var(--color-amber);
+            letter-spacing: 5px;
+            text-shadow: var(--glow-amber);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--color-cyan);
+            border-radius: 50%;
+            box-shadow: var(--glow-cyan);
+            animation: pulse 2s infinite;
+        }
+
+        .status-text {
+            font-size: 10px;
+            letter-spacing: 2px;
+            color: var(--color-cyan);
+        }
+
+        /* Tab Navigation Row */
+        .tab-row {
+            height: 45px;
+            border-bottom: 1px solid rgba(79, 227, 255, 0.05);
+            display: flex;
+            padding: 0 30px;
+            background-color: rgba(10, 18, 24, 0.2);
+            gap: 5px;
+        }
+
+        .tab {
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            font-size: 11px;
+            letter-spacing: 1.5px;
+            color: var(--color-text-dim);
+            border-bottom: 2px solid transparent;
+            text-transform: uppercase;
+        }
+
+        .tab.active {
+            color: var(--color-amber);
+            border-bottom-color: var(--color-amber);
+            font-weight: bold;
+            background: linear-gradient(to top, var(--color-amber-faint), transparent);
+        }
+
+        .tab.inactive {
+            opacity: 0.4;
+        }
+
+        /* Main HUD Content Area */
+        .hud-content {
+            flex: 1;
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+        }
+
+        /* Top Module Row */
+        .notes-meta-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 20px;
+        }
+
+        .meta-panel {
+            background-color: rgba(13, 27, 34, 0.3);
+            border: 1px solid var(--color-cyan-faint);
+            border-radius: 8px;
+            padding: 20px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .panel-label {
+            font-size: 10px;
+            color: var(--color-text-dim);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .raga-name {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--color-amber);
+            text-shadow: var(--glow-amber);
+            margin-bottom: 4px;
+        }
+
+        .raga-class {
+            font-size: 11px;
+            color: var(--color-text);
+            margin-bottom: 10px;
+        }
+
+        .swara-string {
+            font-size: 14px;
+            color: var(--color-cyan);
+            letter-spacing: 4px;
+            font-weight: bold;
+        }
+
+        /* Big Readout Displays */
+        .readout-value {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 22px;
+            font-weight: bold;
+            color: var(--color-cyan);
+            text-shadow: var(--glow-cyan);
+        }
+
+        .readout-sub {
+            font-size: 10px;
+            color: var(--color-text-dim);
+            margin-top: 4px;
+            letter-spacing: 1px;
+        }
+
+        /* Piano Keyboard Visualiser */
+        .piano-panel {
+            flex: 1;
+            background-color: rgba(13, 27, 34, 0.2);
+            border: 1px solid var(--color-cyan-faint);
+            border-radius: 8px;
+            padding: 25px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .piano-keyboard {
+            display: flex;
+            justify-content: center;
+            position: relative;
+            background-color: rgba(0, 0, 0, 0.2);
+            padding: 10px;
+            border-radius: 8px;
+            height: 280px;
+            margin-top: 10px;
+        }
+
+        .piano-key-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+
+        .piano-key.white {
+            width: 76px;
+            height: 240px;
+            background-color: #1a242d;
+            border: 1px solid var(--color-cyan-faint);
+            border-bottom-left-radius: 6px;
+            border-bottom-right-radius: 6px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+            padding-bottom: 20px;
+            transition: all 0.2s ease;
+        }
+
+        /* Inactive white key styling to look dark/cyber */
+        .piano-key.white.inactive {
+            background-color: #0b1116;
+            border-color: rgba(79, 227, 255, 0.05);
+        }
+        .piano-key.white.inactive .western-label {
+            color: rgba(232, 244, 248, 0.15);
+        }
+        .piano-key.white.inactive .swara-label {
+            display: none;
+        }
+
+        /* Active white key (cyan) */
+        .piano-key.white.active-white {
+            background-color: rgba(79, 227, 255, 0.2);
+            border-color: var(--color-cyan);
+            box-shadow: inset 0 -15px 30px rgba(79, 227, 255, 0.15);
+        }
+        .piano-key.white.active-white .swara-label {
+            color: var(--color-cyan);
+            font-weight: bold;
+            text-shadow: var(--glow-cyan);
+            font-size: 16px;
+        }
+        .piano-key.white.active-white .western-label {
+            color: var(--color-text);
+            font-size: 11px;
+        }
+
+        /* Currently sounding playing key (flashing yellow/amber) */
+        .piano-key.active-playing {
+            background-color: rgba(255, 180, 84, 0.45) !important;
+            border-color: var(--color-amber) !important;
+            box-shadow: 0 0 25px rgba(255, 180, 84, 0.6), inset 0 -15px 30px rgba(255, 180, 84, 0.3) !important;
+        }
+        .piano-key.active-playing .swara-label {
+            color: #fff !important;
+            text-shadow: var(--glow-amber) !important;
+        }
+        .piano-key.active-playing .western-label {
+            color: #fff !important;
+        }
+
+        .piano-key.black {
+            width: 44px;
+            height: 145px;
+            background-color: #05080b;
+            border: 1px solid rgba(79, 227, 255, 0.1);
+            border-bottom-left-radius: 4px;
+            border-bottom-right-radius: 4px;
+            position: absolute;
+            right: -22px;
+            top: 0;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+            padding-bottom: 12px;
+            transition: all 0.2s ease;
+        }
+
+        /* Active black key (amber) */
+        .piano-key.black.active-black {
+            background-color: rgba(255, 180, 84, 0.25);
+            border-color: var(--color-amber);
+            box-shadow: inset 0 -10px 20px rgba(255, 180, 84, 0.2);
+        }
+        .piano-key.black.active-black .swara-label {
+            color: var(--color-amber);
+            font-weight: bold;
+            text-shadow: var(--glow-amber);
+            font-size: 13px;
+        }
+        .piano-key.black.active-black .western-label {
+            color: var(--color-text);
+            font-size: 9px;
+        }
+
+        .piano-key.black.inactive {
+            background-color: #030406;
+            border-color: rgba(0,0,0,0.4);
+        }
+        .piano-key.black.inactive .swara-label {
+            display: none;
+        }
+
+        .swara-label {
+            font-size: 14px;
+            color: var(--color-text-dim);
+            margin-bottom: 4px;
+        }
+
+        .western-label {
+            font-size: 10px;
+            color: var(--color-text-dim);
+        }
+
+        /* Keyboard Legend */
+        .keyboard-legend {
+            display: flex;
+            gap: 20px;
+            font-size: 11px;
+            color: var(--color-text-dim);
+            margin-top: 5px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        /* Transport Readout Row */
+        .transport-panel {
+            background-color: rgba(13, 27, 34, 0.4);
+            border: 1px solid var(--color-cyan-faint);
+            border-radius: 8px;
+            padding: 15px 25px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .transport-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .transport-label {
+            font-size: 10px;
+            color: var(--color-text-dim);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        .transport-value {
+            font-size: 12px;
+            font-weight: bold;
+            color: var(--color-cyan);
+        }
+
+        .playback-state {
+            color: var(--color-amber);
+            text-shadow: var(--glow-amber);
+        }
+
+        /* Interactive Voice Command Hints */
+        .voice-hint-panel {
+            border: 1px dashed var(--color-cyan-faint);
+            border-radius: 8px;
+            padding: 15px 20px;
+            background-color: rgba(79, 227, 255, 0.01);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .hint-icon {
+            font-size: 16px;
+            color: var(--color-cyan);
+            animation: bounce-horizontal 1.5s infinite;
+        }
+
+        .hint-title {
+            font-size: 10px;
+            font-weight: bold;
+            color: var(--color-cyan);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .hint-carousel {
+            font-size: 12px;
+            color: var(--color-text-dim);
+            letter-spacing: 0.5px;
+            display: flex;
+            gap: 15px;
+            overflow: hidden;
+        }
+
+        .hint-phrase {
+            background-color: rgba(18, 48, 58, 0.3);
+            padding: 2px 10px;
+            border-radius: 4px;
+            border: 1px solid rgba(79, 227, 255, 0.08);
+            color: var(--color-text);
+        }
+
+        /* Animations */
+        @keyframes pulse {
+            0% { opacity: 0.3; }
+            50% { opacity: 1; }
+            100% { opacity: 0.3; }
+        }
+
+        @keyframes bounce-horizontal {
+            0%, 100% { transform: translateX(0); }
+            50% { transform: translateX(4px); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="scanlines"></div>
+
+    <div class="hud-window">
+        <!-- Header -->
+        <header>
+            <div class="header-left">
+                <span class="back-indicator">&lt; ESC</span>
+                <span class="space-title">SPACE_MUSIC</span>
+            </div>
+            <div class="header-right">
+                <div class="status-dot"></div>
+                <span class="status-text">LISTENING</span>
+            </div>
+        </header>
+
+        <!-- Module Navigation Placeholders -->
+        <div class="tab-row">
+            <div class="tab active">Notes</div>
+            <div class="tab inactive">Tanpura Drone</div>
+            <div class="tab inactive">Practice Mode</div>
+            <div class="tab inactive">Raga Library</div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="hud-content">
+            <!-- Raga Metadata & Configuration Display -->
+            <div class="notes-meta-row">
+                <div class="meta-panel">
+                    <span class="panel-label">ACTIVE_RAGA</span>
+                    <h2 class="raga-name">Kalyani</h2>
+                    <p class="raga-class">Melakarta (72-Scale Tradition) • parent derived</p>
+                    <div class="swara-string">S R2 G3 M2 P D2 N3 S</div>
+                </div>
+
+                <div class="meta-panel">
+                    <span class="panel-label">PLAYBACK_MODE</span>
+                    <div class="readout-value">PIANO ROLL</div>
+                    <div class="readout-sub">PCM Sine Synthesis</div>
+                </div>
+
+                <div class="meta-panel">
+                    <span class="panel-label">TONIC</span>
+                    <div class="readout-value" style="color: var(--color-amber); text-shadow: var(--glow-amber);">KEY: D</div>
+                    <div class="readout-sub">Root reference pitch</div>
+                </div>
+            </div>
+
+            <!-- Piano Keyboard Visualiser -->
+            <div class="piano-panel">
+                <span class="panel-label">Piano Roll — Full Keyboard (Raga Notes Highlighted)</span>
+                <div class="piano-keyboard">
+                    <!-- C -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white inactive">
+                            <span class="western-label">C</span>
+                        </div>
+                        <!-- C# / N3 (active-black, since it's the Kakali Nishad below tonic D) -->
+                        <div class="piano-key black active-black">
+                            <span class="swara-label">N3</span>
+                            <span class="western-label">C#</span>
+                        </div>
+                    </div>
+                    <!-- D / S (active-white, Tonic) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white active-white">
+                            <span class="swara-label">S</span>
+                            <span class="western-label">D</span>
+                        </div>
+                        <!-- D# (inactive black) -->
+                        <div class="piano-key black inactive">
+                            <span class="western-label">D#</span>
+                        </div>
+                    </div>
+                    <!-- E / R2 (active-white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white active-white">
+                            <span class="swara-label">R2</span>
+                            <span class="western-label">E</span>
+                        </div>
+                    </div>
+                    <!-- F (inactive white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white inactive">
+                            <span class="western-label">F</span>
+                        </div>
+                        <!-- F# / G3 (active-black, AND currently active-playing!) -->
+                        <div class="piano-key black active-black active-playing">
+                            <span class="swara-label">G3</span>
+                            <span class="western-label">F#</span>
+                        </div>
+                    </div>
+                    <!-- G (inactive white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white inactive">
+                            <span class="western-label">G</span>
+                        </div>
+                        <!-- G# / M2 (active-black) -->
+                        <div class="piano-key black active-black">
+                            <span class="swara-label">M2</span>
+                            <span class="western-label">G#</span>
+                        </div>
+                    </div>
+                    <!-- A / P (active-white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white active-white">
+                            <span class="swara-label">P</span>
+                            <span class="western-label">A</span>
+                        </div>
+                        <!-- A# (inactive black) -->
+                        <div class="piano-key black inactive">
+                            <span class="western-label">A#</span>
+                        </div>
+                    </div>
+                    <!-- B / D2 (active-white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white active-white">
+                            <span class="swara-label">D2</span>
+                            <span class="western-label">B</span>
+                        </div>
+                    </div>
+                    <!-- C' (inactive white) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white inactive">
+                            <span class="western-label">C</span>
+                        </div>
+                        <!-- C#' / N3' (active-black) -->
+                        <div class="piano-key black active-black">
+                            <span class="swara-label">N3</span>
+                            <span class="western-label">C#</span>
+                        </div>
+                    </div>
+                    <!-- D' / S' (active-white, Octave Tonic) -->
+                    <div class="piano-key-wrapper">
+                        <div class="piano-key white active-white">
+                            <span class="swara-label">S'</span>
+                            <span class="western-label">D</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="keyboard-legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(79, 227, 255, 0.2); border: 1px solid var(--color-cyan);"></div>
+                        <span>Raga Swara (White Key)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(255, 180, 84, 0.25); border: 1px solid var(--color-amber);"></div>
+                        <span>Raga Swara (Black Key)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: rgba(255, 180, 84, 0.9); box-shadow: 0 0 10px rgba(255, 180, 84, 0.8);"></div>
+                        <span>Currently Sounding</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: #0b1116; border: 1px solid rgba(255,255,255,0.1);"></div>
+                        <span>Not in Raga</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transport readouts -->
+            <div class="transport-panel">
+                <div class="transport-item">
+                    <span class="transport-label">Transport Status:</span>
+                    <span class="transport-value playback-state">PLAYING (AROHANA)</span>
+                </div>
+                <div class="transport-item">
+                    <span class="transport-label">Tempo:</span>
+                    <span class="transport-value">60 BPM</span>
+                </div>
+                <div class="transport-item">
+                    <span class="transport-label">Loop Mode:</span>
+                    <span class="transport-value" style="color: var(--color-cyan);">ON</span>
+                </div>
+            </div>
+
+            <!-- Say a Command Hints -->
+            <div class="voice-hint-panel">
+                <span class="hint-icon">➔</span>
+                <span class="hint-title">Say a command:</span>
+                <div class="hint-carousel">
+                    <span class="hint-phrase">"play the arohana"</span>
+                    <span class="hint-phrase">"play it in D"</span>
+                    <span class="hint-phrase">"switch to piano mode"</span>
+                    <span class="hint-phrase">"set tempo to 75"</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

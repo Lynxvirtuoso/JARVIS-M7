@@ -1,12 +1,13 @@
-from core.database import db
-from services.brain.provider_manager import brain_manager
 import re
-
+from core.database import db
 from core.logger import logger
+from services.brain.provider_manager import brain_manager, BrainRequest
+
 
 def needs_web_search(text: str) -> bool:
     """
     Returns True if the text indicates a query requiring real-time web search.
+    Default is False.
     """
     text_lower = text.lower().strip()
     
@@ -17,86 +18,53 @@ def needs_web_search(text: str) -> bool:
     ]
     for prefix in prefix_patterns:
         text_lower = re.sub(prefix, "", text_lower).strip()
-    
-    # 1. Expanded keyword categories
-    sports = ["score", "won", "winner", "match", "game", "tournament", "championship", "final", "playoffs", "standings", "ranking"]
-    finance = ["price", "stock", "market", "exchange rate", "crypto", "bitcoin", "value of"]
-    news = ["news", "headline", "breaking", "happened", "announcement", "release", "launch", "update"]
-    time_relative = ["current", "latest", "today", "this week", "this month", "this year", "right now", "recently", "yesterday", "as of", "up to date", "nowadays"]
-    roles = ["current president", "current ceo", "who is the current", "who leads"]
-    direct = ["search", "google", "look up", "find out"]
 
-    search_terms = sports + finance + news + time_relative + roles + direct
-    for term in search_terms:
-        pattern = rf"\b{re.escape(term)}\b"
+    # Specific live/current search categories with word boundaries
+    live_phrases = [
+        r"\btoday\b", r"\blatest\b", r"\bcurrently\b", r"\bright now\b", r"\brecent\b",
+        r"\bnews\b", r"\bweather\b", r"\bprice\b", r"\bscore\b", r"\bschedule\b", r"\bstock\b",
+        r"\bexchange rate\b", r"\blive\b", r"\bwho is the current\b", r"\bwhat happened today\b",
+        r"\bthis week\b", r"\bthis month\b", r"\bnew release\b", r"\blatest version\b",
+        r"\bcurrent (price|weather|president|ceo|leader|version|status|score|news)\b",
+        r"\b(doing|happening|going on)\s+currently\b"
+    ]
+
+    for pattern in live_phrases:
         if re.search(pattern, text_lower):
             return True
 
-    # 2. Evergreen / conceptual exclusions
-    evergreen_patterns = [
-        r"\bwhy is\b",
-        r"\bhow does\b.*\bwork\b",
-        r"\bexplain\b",
-        r"\bwhat is the definition of\b",
-        r"\bhow do magnets\b",
-        r"\bwhat causes\b"
-    ]
-    for pattern in evergreen_patterns:
-        if re.search(pattern, text_lower):
-            return False
+    return False
 
-    # 3. Default safety net (default to search) with tracking log
-    logger.info(f"needs_web_search: safety-net default triggered for: {text}")
-    return True
 
 class AIBrain:
     """
     JARVIS Natural Language NLU layer delegating to the BrainProviderManager.
     Maintains history context from SQLite database.
     """
-    def think(self, command: str) -> str:
+    def think(self, command: str, request_metadata: BrainRequest = None) -> str:
         """
         Sends the command + context history to the active Brain provider and retrieves response.
         """
-        # Retrieve last 10 turns of history
         history = db.get_history(limit=10)
-        
-        if needs_web_search(command):
-            groq_provider = brain_manager.providers.get("groq")
-            if groq_provider and hasattr(groq_provider, "think_compound_mini"):
-                try:
-                    result_text = "".join(list(groq_provider.think_compound_mini(command, history)))
-                    db.add_history("user", command)
-                    db.add_history("model", result_text)
-                    return result_text
-                except Exception as e:
-                    from core.logger import logger
-                    logger.error(f"groq/compound-mini think failed, falling back: {e}")
+        req = request_metadata if isinstance(request_metadata, BrainRequest) else BrainRequest(text=command)
 
-        result = brain_manager.think(command, history)
+        result = brain_manager.think(req, history)
+        reply_text = result.text if hasattr(result, "text") and result.text else ""
         
-        # Save history to SQLite
-        db.add_history("user", command)
-        db.add_history("model", result.text)
+        if reply_text:
+            db.add_history("user", command)
+            db.add_history("model", reply_text)
         
-        return result.text
+        return reply_text
 
-    def think_stream(self, command: str):
+    def think_stream(self, command: str, request_metadata: BrainRequest = None):
         """
         Yields tokens from the active Brain provider chunk-by-chunk.
         """
         history = db.get_history(limit=10)
-        if needs_web_search(command):
-            groq_provider = brain_manager.providers.get("groq")
-            if groq_provider and hasattr(groq_provider, "think_compound_mini"):
-                try:
-                    yield from groq_provider.think_compound_mini(command, history)
-                    return
-                except Exception as e:
-                    from core.logger import logger
-                    logger.error(f"groq/compound-mini think_stream failed, falling back: {e}")
-        yield from brain_manager.think_stream(command, history)
+        req = request_metadata if isinstance(request_metadata, BrainRequest) else BrainRequest(text=command)
+        yield from brain_manager.think_stream(req, history)
+
 
 # Global brain instance
 brain = AIBrain()
-

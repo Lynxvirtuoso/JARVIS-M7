@@ -34,7 +34,7 @@ class TrustGate:
         voice_min_audio_quality = config.trust_gate_voice_min_audio_quality
         voice_confirm_confidence = config.trust_gate_voice_confirm_confidence
 
-        if tool_call.source == "typed":
+        if tool_call.source in ("typed", "telegram"):
             if tool_call.confidence > typed_min_confidence:
                 return EXECUTE
             else:

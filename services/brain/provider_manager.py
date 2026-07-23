@@ -1,5 +1,7 @@
 import time
 import re
+from enum import Enum
+from dataclasses import dataclass
 from core.config import config
 from core.logger import logger
 from services.brain.base import BrainResult
@@ -7,16 +9,62 @@ from services.brain.ollama_brain_provider import OllamaBrainProvider
 from services.brain.gemini_brain_provider import GeminiBrainProvider
 from services.brain.groq_brain_provider import GroqBrainProvider
 
-# Default provider order: cloud Groq first, local Ollama as fallback
-_DEFAULT_BRAIN_ORDER = ["groq", "ollama"]
+
+class BrainRoute(Enum):
+    DIRECT_COMMAND = "direct_command"
+    SIMPLE_CHAT = "simple_chat"
+    PRIVATE_LOCAL = "private_local"
+    COMPLEX_REASONING = "complex_reasoning"
+    CURRENT_INFORMATION = "current_information"
+    MULTIMODAL = "multimodal"
+
+
+@dataclass
+class BrainRequest:
+    text: str
+    contains_private_data: bool = False
+    local_only: bool = False
+    cloud_allowed: bool = True
+    needs_current_information: bool = False
+
+
+def get_provider_order(selected: str) -> list[str]:
+    fallback_order = ["ollama", "groq", "gemini"]
+    if selected not in fallback_order:
+        selected = "groq"
+
+    return [selected] + [p for p in fallback_order if p != selected]
+
+
+def is_valid_result(result: BrainResult) -> bool:
+    return (
+        result is not None
+        and getattr(result, "success", True) is True
+        and isinstance(getattr(result, "text", None), str)
+        and bool(result.text.strip())
+    )
+
+
+PRIVATE_PHRASES = [
+    "keep this local",
+    "keep this private",
+    "do not send this online",
+    "don't send this online",
+    "offline only",
+    "use the local model",
+    "use ollama only",
+    "do not use the cloud",
+    "don't use the cloud",
+    "answer locally",
+    "process this locally",
+    "private mode",
+]
+
 
 class BrainProviderManager:
     def __init__(self):
         self.providers = {}
         self.register_providers()
-        self.health_cache = {}
-        self.last_health_check_time = 0.0
-        self.health_cache_ttl = 15.0  # 15 seconds cache
 
     def register_providers(self):
         self.providers["ollama"] = OllamaBrainProvider()
@@ -29,94 +77,175 @@ class BrainProviderManager:
             selected = "groq"
         return self.providers[selected]
 
-    def get_fallback_order(self) -> list[str]:
-        selected = config.get("brain_provider", "groq")
-        order: list[str] = [selected] if selected in self.providers else ["groq"]
-        
-        for p in _DEFAULT_BRAIN_ORDER:
-            if p in self.providers and p not in order:
-                order.append(p)
-        return order
+    def get_fallback_order(self, selected: str = None) -> list[str]:
+        if not selected:
+            selected = config.get("brain_provider", "groq")
+        return get_provider_order(selected)
 
-    def think(self, text: str, history: list[dict] = None) -> BrainResult:
-        fallback_order = ["ollama", "groq", "gemini"]
+    def determine_route(self, request: BrainRequest | str) -> tuple[BrainRoute, list[str], bool]:
+        if isinstance(request, str):
+            req = BrainRequest(text=request)
+        else:
+            req = request
+
+        text_lower = req.text.lower().strip()
+
+        from core.config import parse_bool
+        # Check private phrases
+        is_private_phrase = any(
+            re.search(rf"\b{re.escape(phrase)}\b", text_lower)
+            for phrase in PRIVATE_PHRASES
+        )
+
+        # Local-only override check
+        if parse_bool(config.get("local_only_mode", False)) or req.local_only or is_private_phrase or (req.contains_private_data and not req.cloud_allowed):
+            return BrainRoute.PRIVATE_LOCAL, ["ollama"], False
+
+        # Brain mode check
+        brain_mode = config.get("brain_mode", "smart_auto")
+        if brain_mode == "manual":
+            selected = config.get("brain_provider", "groq")
+            order = get_provider_order(selected)
+            from core.brain import needs_web_search
+            web_needed = req.needs_current_information or needs_web_search(req.text)
+            return BrainRoute.SIMPLE_CHAT, order, web_needed
+
+        # Multimodal request indicator
+        if getattr(req, "is_multimodal", False) or "attached image" in text_lower or "image attached" in text_lower or "describe this image" in text_lower:
+            return BrainRoute.MULTIMODAL, ["gemini", "groq"], False
+
+        # Smart Auto Mode classification
+        from core.brain import needs_web_search
+        web_needed = req.needs_current_information or needs_web_search(req.text)
+
+        # Coding / reasoning indicators (word boundaries and traceback/explain detection)
+        coding_keywords = ["code", "script", "python", "function", "debug", "algorithm", "refactor", "program", "traceback", "stack trace", "error log"]
+        is_complex = any(re.search(rf"\b{re.escape(kw)}\b", text_lower) for kw in coding_keywords) or text_lower.startswith("explain this python") or len(req.text.split()) > 25
+
+        if web_needed:
+            return BrainRoute.CURRENT_INFORMATION, ["groq", "gemini", "ollama"], True
+        elif is_complex:
+            return BrainRoute.COMPLEX_REASONING, ["groq", "gemini", "ollama"], False
+        else:
+            return BrainRoute.SIMPLE_CHAT, ["ollama", "groq", "gemini"], False
+
+    def think(self, request: BrainRequest | str, history: list[dict] = None) -> BrainResult:
+        if isinstance(request, str):
+            req = BrainRequest(text=request)
+        else:
+            req = request
+
+        start_time = time.monotonic()
+        route, provider_order, web_needed = self.determine_route(req)
+
+        logger.info(
+            f"Brain route: {route.value.upper()} | Brain mode: {config.get('brain_mode', 'smart_auto').upper()} | "
+            f"Providers: {provider_order} | Web search: {web_needed}"
+        )
+
+        # Web-enabled search handling if route requires it
+        if web_needed and "groq" in provider_order:
+            groq_provider = self.providers.get("groq")
+            if groq_provider and hasattr(groq_provider, "think_compound_mini"):
+                try:
+                    logger.info("Routing query to Web-enabled Groq compound-mini...")
+                    res_tokens = list(groq_provider.think_compound_mini(req.text, history))
+                    res_text = "".join(res_tokens).strip()
+                    if res_text:
+                        latency_ms = int((time.monotonic() - start_time) * 1000)
+                        logger.info(f"Brain execution successful (web-groq) | Latency: {latency_ms} ms")
+                        return BrainResult(text=res_text, provider="groq", success=True)
+                except Exception as e:
+                    logger.warning(f"Web-enabled Groq search failed: {e}. Falling back to standard provider order.")
 
         last_error = None
-        health_report = self.get_health_report()
-
-        for i, provider_id in enumerate(fallback_order):
+        for provider_id in provider_order:
             provider = self.providers.get(provider_id)
             if provider is None:
                 continue
 
-            status_info = health_report.get(provider_id, {"healthy": False, "status": "Unknown"})
-            if not status_info["healthy"]:
-                if i == 0:
-                    logger.warning(
-                        f"Brain provider {provider_id!r} is unhealthy: {status_info['status']}. Skipping."
-                    )
-                continue
-
             try:
-                logger.info(f"Thinking via Brain provider: {provider_id}")
-                return provider.think(text, history)
+                if provider_id == "groq":
+                    res = provider.think(req.text, history, use_web=web_needed)
+                else:
+                    res = provider.think(req.text, history)
+                if is_valid_result(res):
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    logger.info(
+                        f"Brain route: {route.value.upper()} | Selected provider: {provider_id} | "
+                        f"Model: {getattr(provider, 'model', 'default')} | Thinking: disabled | "
+                        f"Web search: {web_needed} | Fallback used: {'yes' if provider_id != provider_order[0] else 'no'} | "
+                        f"Latency: {latency_ms} ms"
+                    )
+                    return res
+                else:
+                    err_msg = getattr(res, "error", "Invalid or empty response")
+                    err_type = getattr(res, "error_type", "invalid_response")
+                    logger.warning(f"Provider skipped: {provider_id} | Reason: {err_type} ({err_msg})")
             except Exception as e:
                 logger.error(f"Brain provider {provider_id!r} failed: {e}")
                 last_error = e
-                next_idx = i + 1
-                if next_idx < len(fallback_order):
-                    next_p = fallback_order[next_idx]
-                    logger.warning(f"Brain provider {provider_id!r} failed. Falling back to {next_p!r}.")
 
-                    try:
-                        is_healthy, status = provider.health()
-                        self.health_cache[provider_id] = {"healthy": is_healthy, "status": status}
-                    except Exception:
-                        self.health_cache[provider_id] = {"healthy": False, "status": "Error"}
+        salutation = config.salutation
+        return BrainResult(
+            text=f"I apologize {salutation}, all available AI brain providers are currently unreachable.",
+            provider="none",
+            success=False,
+            error=str(last_error) if last_error else "All providers failed",
+            error_type="all_providers_failed"
+        )
 
-        raise RuntimeError("All Brain providers failed.") from last_error
+    def think_stream(self, request: BrainRequest | str, history: list[dict] = None):
+        if isinstance(request, str):
+            req = BrainRequest(text=request)
+        else:
+            req = request
 
-    def think_stream(self, text: str, history: list[dict] = None):
-        fallback_order = ["ollama", "groq", "gemini"]
+        route, provider_order, web_needed = self.determine_route(req)
 
-        last_error = None
-        health_report = self.get_health_report()
+        if web_needed and "groq" in provider_order:
+            groq_provider = self.providers.get("groq")
+            if groq_provider and hasattr(groq_provider, "think_compound_mini"):
+                try:
+                    yield from groq_provider.think_compound_mini(req.text, history)
+                    return
+                except Exception as e:
+                    logger.warning(f"Web-enabled Groq search stream failed: {e}. Falling back to standard stream.")
 
-        for i, provider_id in enumerate(fallback_order):
+        for provider_id in provider_order:
             provider = self.providers.get(provider_id)
             if provider is None:
                 continue
 
-            status_info = health_report.get(provider_id, {"healthy": False, "status": "Unknown"})
-            if not status_info["healthy"]:
-                continue
-
             try:
-                logger.info(f"Thinking (stream) via Brain provider: {provider_id}")
                 if hasattr(provider, "think_stream"):
-                    yield from provider.think_stream(text, history)
+                    chunk_yielded = False
+                    for chunk in provider.think_stream(req.text, history):
+                        if chunk:
+                            chunk_yielded = True
+                            yield chunk
+                    if chunk_yielded:
+                        return
                 else:
-                    res = provider.think(text, history)
-                    yield res.text
-                return
+                    res = provider.think(req.text, history)
+                    if is_valid_result(res):
+                        yield res.text
+                        return
             except Exception as e:
                 logger.error(f"Brain provider {provider_id!r} stream failed: {e}")
-                last_error = e
 
-        yield f"All Brain providers failed. Last error: {last_error}"
+        salutation = config.salutation
+        yield f"All Brain providers failed, {salutation}."
 
     def get_health_report(self, force: bool = False) -> dict:
-        now = time.time()
-        if force or not self.health_cache or (now - self.last_health_check_time) > self.health_cache_ttl:
-            report = {}
-            for pid, provider in self.providers.items():
-                try:
-                    is_healthy, status = provider.health()
-                except Exception as e:
-                    is_healthy, status = False, f"Error: {e}"
-                report[pid] = {"healthy": is_healthy, "status": status}
-            self.health_cache = report
-            self.last_health_check_time = now
-        return self.health_cache
+        report = {}
+        for pid, provider in self.providers.items():
+            try:
+                is_healthy, status = provider.health()
+            except Exception as e:
+                is_healthy, status = False, f"Error: {e}"
+            report[pid] = {"healthy": is_healthy, "status": status}
+        return report
+
 
 brain_manager = BrainProviderManager()

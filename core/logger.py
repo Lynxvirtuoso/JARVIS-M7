@@ -18,6 +18,22 @@ class EventBusLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
+class RedactingFormatter(logging.Formatter):
+    """Sanitizes sensitive tokens, API keys, and credentials from log output."""
+    def format(self, record):
+        msg = super().format(record)
+        import re
+        patterns = [
+            (r"(gsk_[A-Za-z0-9_-]{20,})", r"gsk_***REDACTED***"),
+            (r"(AIzaSy[A-Za-z0-9_-]{20,})", r"AIzaSy***REDACTED***"),
+            (r"(sk-proj-[A-Za-z0-9_-]{20,})", r"sk-proj-***REDACTED***"),
+            (r"(phone_call_token=['\"]?)[a-f0-9]{32}", r"\1***REDACTED***"),
+            (r"(Bearer\s+)[A-Za-z0-9_.-]{20,}", r"\1***REDACTED***"),
+        ]
+        for pattern, replacement in patterns:
+            msg = re.sub(pattern, replacement, msg)
+        return msg
+
 def setup_logger():
     logger = logging.getLogger("JARVIS")
     logger.setLevel(logging.DEBUG)
@@ -26,7 +42,7 @@ def setup_logger():
     if logger.handlers:
         return logger
         
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s')
+    formatter = RedactingFormatter('%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) - %(message)s')
     
     # File Handler
     log_file = os.path.join("logs", f"jarvis_{datetime.now().strftime('%Y%m%d')}.log")

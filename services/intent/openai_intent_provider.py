@@ -30,17 +30,27 @@ class OpenAIIntentProvider(BaseIntentProvider):
             "Do not include explanations.\n"
             "Do not execute anything.\n\n"
             "Allowed actions:\n"
-            "open_app, close_app, search_app, open_website, volume, screenshot, sleep_hud, full_exit, ask_general, unknown.\n\n"
+            "open_app, close_app, search_app, open_website, volume, screenshot, sleep_hud, full_exit, ask_general, unknown, "
+            "create_event, update_event, delete_event, list_events, get_next_event, check_availability, place_call.\n\n"
             "Known app names are supplied separately by the local app resolver.\n\n"
             "If the user wants to open or close an app, return the app name exactly as spoken by the user. The local app resolver will decide the executable.\n\n"
-            "Return JSON only:\n"
-            "{\n"
-            "  \"action\": \"...\",\n"
-            "  \"target\": \"...\",\n"
-            "  \"confidence\": 0.0,\n"
-            "  \"requires_confirmation\": false\n"
-            "}"
+            "For calendar actions, the 'target' field MUST be a JSON-serialized string containing the parameters:\n"
+            "- create_event: {\"summary\": string, \"start_time\": ISO8601_datetime, \"end_time\": ISO8601_datetime, \"description\": string/null, \"location\": string/null, \"attendees\": [string]/null}. IMPORTANT: Do NOT guess/fabricate email addresses. Only populate the attendees array if actual email addresses (containing '@') are explicitly provided in the command. If only names are given, append/put them in the summary (e.g. 'Lunch with Alex') and leave attendees null.\n"
+            "- update_event: {\"event_ref\": string, \"updates\": dict}. E.g. updates can contain location, description, or start_time/end_time for time rescheduling. Explicitly recognize rescheduling/time modification verbs like 'move', 'reschedule', 'push to', 'postpone', 'change the time of' as update_event.\n"
+            "- delete_event: {\"event_ref\": string}\n"
+            "- list_events: {\"time_min\": ISO8601_datetime, \"time_max\": ISO8601_datetime}\n"
+            "- get_next_event: {}\n"
+            "- check_availability: {\"start_time\": ISO8601_datetime, \"end_time\": ISO8601_datetime}\n\n"
+            "For call actions (e.g., 'call Alex', 'phone mom', 'dial +1234567890'), the action is 'place_call' and the 'target' field MUST be a string representing the contact name or query parameter for the person they want to call.\n"
+            "Recognize all natural phrasings expressing intent to phone someone, followed by a person/contact name, such as: 'call X', 'call up X', 'make a call to X', 'make me a call to X', 'phone X', 'dial X', 'ring X', 'give X a call', 'get X on the phone', 'can you call X', 'I want to call X', 'place a call to X', 'reach out to X by phone', 'connect me to X', 'try calling X' (where X is the target contact name).\n\n"
+            "Return JSON only:"
         )
+
+        from services.calendar_service import get_local_timezone_name
+        import datetime
+        local_tz = datetime.datetime.now().astimezone().tzinfo
+        current_time = datetime.datetime.now(local_tz).strftime("%A, %B %d, %Y, %I:%M %p")
+        system_instruction += f"\n\nCurrent local time: {current_time} (timezone: {get_local_timezone_name()})"
 
         payload = {
             'model': 'gpt-4o-mini',

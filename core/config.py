@@ -7,6 +7,20 @@ from core.logger import logger
 # Load environment variables from .env if present
 load_dotenv()
 
+def parse_bool(value: object, *, default: bool = False) -> bool:
+    """Safely parses Boolean values from bool, int, or string representations."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"false", "0", "no", "off", "disabled", ""}:
+            return False
+    return default
+
 class ConfigManager:
     """Manages application configurations combined from Environment, SQLite, and config.json."""
     def __init__(self, json_path="config.json"):
@@ -91,12 +105,7 @@ class ConfigManager:
 
     @property
     def gemini_quota_saver_mode(self):
-        val = self.get("gemini_quota_saver_mode")
-        if val is None:
-            return True
-        if isinstance(val, str):
-            return val.lower() == "true"
-        return bool(val)
+        return parse_bool(self.get("gemini_quota_saver_mode"), default=True)
 
     @property
     def trust_gate_typed_min_confidence(self):
@@ -116,12 +125,7 @@ class ConfigManager:
 
     @property
     def autostart_enabled(self) -> bool:
-        val = self.get("autostart_enabled")
-        if val is None:
-            return False
-        if isinstance(val, str):
-            return val.lower() == "true"
-        return bool(val)
+        return parse_bool(self.get("autostart_enabled"), default=False)
 
     @property
     def response_popup_dismiss_delay(self) -> int:

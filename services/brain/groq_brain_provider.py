@@ -34,14 +34,26 @@ class GroqBrainProvider(BrainProvider):
             return False, f"Groq is cooling down ({remaining}s remaining)"
         return True, "Ready"
 
-    def think(self, text: str, history: list[dict] = None, search_context: str = None) -> BrainResult:
+    def think(self, text: str, history: list[dict] = None, search_context: str = None, use_web: bool = False) -> BrainResult:
+        if use_web:
+            try:
+                tokens = list(self.think_compound_mini(text, history))
+                res_text = "".join(tokens).strip()
+                if res_text:
+                    return BrainResult(text=res_text, provider=self.provider_id, success=True)
+            except Exception as e:
+                logger.warning(f"Groq search-capable path failed: {e}. Falling back to standard model.")
+
         salutation = config.salutation
         api_key = _load_api_key()
         
         if not api_key:
             return BrainResult(
-                text=f"I am currently offline as the Groq API key is missing. Please configure it in settings, {salutation}.",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error="Groq API key is missing",
+                error_type="missing_api_key"
             )
 
         model_name = config.get("groq_brain_model", "llama-3.3-70b-versatile")
@@ -49,8 +61,11 @@ class GroqBrainProvider(BrainProvider):
         if not groq_quota_manager.is_available(model_name, "brain"):
             remaining = groq_quota_manager.get_remaining_seconds(model_name, "brain")
             return BrainResult(
-                text=f"Groq is cooling down, Sir. Please try again in a moment ({remaining}s remaining).",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error=f"Groq is cooling down ({remaining}s remaining)",
+                error_type="cooldown"
             )
 
         sys_instruction = (
@@ -98,23 +113,36 @@ class GroqBrainProvider(BrainProvider):
                     retry_seconds = extract_retry_delay_seconds(response.headers, error_text)
                     groq_quota_manager.set_cooldown(model_name, retry_seconds, "brain")
                     return BrainResult(
-                        text="Groq quota is temporarily exhausted, Sir. I will use offline controls until it resets.",
-                        provider=self.provider_id
+                        text="",
+                        provider=self.provider_id,
+                        success=False,
+                        error="Groq quota is temporarily exhausted",
+                        error_type="quota_exceeded"
                     )
                 raise RuntimeError(f"Groq Chat API error {response.status_code}: {error_text}")
 
             res_data = response.json()
             reply = res_data["choices"][0]["message"]["content"].strip()
-            return BrainResult(text=reply, provider=self.provider_id)
+            return BrainResult(text=reply, provider=self.provider_id, success=True)
 
         except Exception as e:
             logger.error(f"Groq Brain execution error: {e}", exc_info=True)
             return BrainResult(
-                text=f"I encountered a communication issue, {salutation}. The details are logged in the console.",
-                provider=self.provider_id
+                text="",
+                provider=self.provider_id,
+                success=False,
+                error=str(e),
+                error_type="execution_error"
             )
 
-    def think_stream(self, text: str, history: list[dict] = None, search_context: str = None):
+    def think_stream(self, text: str, history: list[dict] = None, search_context: str = None, use_web: bool = False):
+        if use_web:
+            try:
+                yield from self.think_compound_mini(text, history)
+                return
+            except Exception as e:
+                logger.warning(f"Groq search-capable streaming path failed: {e}. Falling back to standard model.")
+
         salutation = config.salutation
         api_key = _load_api_key()
         if not api_key:

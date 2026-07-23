@@ -45,6 +45,9 @@ class EventBus(QObject):
     # Console feed events
     console_log = pyqtSignal(str, str) # level (INFO, WARN, etc), message
     
+    # Music Space events (engine -> HUD)
+    music_space_updated = pyqtSignal(dict)
+    
     _instance = None
 
     @classmethod

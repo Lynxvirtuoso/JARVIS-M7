@@ -1,0 +1,84 @@
+{
+  "contacts": {
+    "Amma": [
+      "Mom", "Mum", "Ma", "Amma", "Ama", "Umma", "Aama", "Om", "Homme", 
+      "Emma", "Alma", "Comma", "Amba", "Ammo", "Amman", "Am up", "Ammar", "Anna", "Hama"
+    ],
+    "Appa": [
+      "Dad", "Dada", "Appa", "Ahpa", "Apa", "Uppa", "Opa", "Papa", "Abba", "Aupa", 
+      "Upper", "Ahppa", "Apple", "Appu", "Appah", "Habba", "Athba", "Aba", "Abbah", "Happer"
+    ],
+    "B Sharp": [
+      "B Sharp", "Be Sharp", "Bee Sharp", "B Shot", "B Shark", "Beach Art", "B Shirt", 
+      "Bshart", "Bee Shart", "B Sh", "Bishar", "B Shard", "Bea Sharp", "Bsharp", "B. Sharp", 
+      "Bea Shart", "Beshaap", "B Shaap", "Bishaap", "Beeshop"
+    ],
+    "Mama": [
+      "Mama", "Maama", "Mamaa", "Marma", "Momma", "Mumma", "Mamma", "Mamah", "Mamar", 
+      "Mahma", "Mumaa", "Mumu", "Mamu", "Mamow", "Marmar", "Mammer", "Mahmar", "Nama", 
+      "Yama", "Amama", "Mamaji"
+    ],
+    "Athai": [
+      "Athai", "Aathai", "Athaai", "Athy", "Athay", "Atthai", "Athae", "Uthai", "Athie", 
+      "Aathi", "Athighe", "Athaii", "Aatai", "Athayi", "Aithai", "Athaye", "Athhai", "Athy Ma"
+    ],
+    "Naxx": [
+      "Naxx", "Nax", "Nacks", "Knacks", "Naks", "Nux", "Nacs", "Nax's", "Nex", "Nax X", 
+      "Knox", "Naxs", "Naax", "Nachos", "Nyaks", "Naks's", "Nax'z", "Nacks's", "Nachs", "Nyax"
+    ],
+    "Thar": [
+      "Thar", "Thaar", "Thur", "Tar", "Tharr", "Thaa", "Thors", "Thaur", "Thare", "Tharh", 
+      "Ther", "Thawr", "Tarr", "Thaari", "Thard", "Thars", "Thaaru", "Thara", "Thur's", "Thare's"
+    ],
+    "Samuel": [
+      "Samuel", "Sam", "Samwell", "Samuail", "Samule", "Samyul", "Sammuel", "Samue", 
+      "Sammy", "Samul", "Sam You'll", "Samyoul", "Samhuel", "Sameul", "Samwel", "Samil", 
+      "Zamuel", "Samuil", "Sam-you-well"
+    ],
+    "Poornalalita": [
+      "Poornalalitha"
+    ],
+    "Jeevantikā": [
+      "Jeevanthikā"
+    ],
+    "Suddha Sārang": [
+      "Suddha Sāranga", "Shuddha Sārang"
+    ]
+  },
+  "calendar_terms": {
+    "call": [
+      "kohl", "kool", "kual", "calls", "col"
+    ],
+    "Meeting": [
+      "Meting", "Meeing", "Meatin'", "Meetin", "Meed thing", "Meaten", "Meaning", "Meetting"
+    ],
+    "Meet": [
+      "Meat", "Mit", "Mete", "Meed", "Mheet", "Meit", "Miit", "Meat's", "Neet"
+    ],
+    "Discussion": [
+      "Dis cushion", "Discusion", "Discretion", "Discation", "Diss question", 
+      "Discushun", "Discusan", "Dischusion", "Discussed shun"
+    ],
+    "Online Meet": [
+      "On line meet", "Online Meat", "On-lime meet", "Online Mit", "Only Meet", 
+      "Online Meed", "Onland meet", "On light meet", "Online Neet"
+    ],
+    "Rehearsal": [
+      "rehersal", "rehercal", "rehersel"
+    ]
+  },
+  "lifecycle_terms": {
+    "Jarvis": [
+      "Javis", "Charvesh", "Jervis", "Jarves"
+    ],
+    "shutdown": [
+      "shadown"
+    ],
+    "sleep": [
+      "sleap"
+    ],
+    "exit": [
+      "exet"
+    ]
+  }
+}

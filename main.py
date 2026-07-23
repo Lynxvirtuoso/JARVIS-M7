@@ -23,7 +23,7 @@ import time
 for attempt in range(4):
     try:
         from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QObject, pyqtSlot
+        from PyQt6.QtCore import QObject, pyqtSlot, QTimer
         break
     except (ImportError, ModuleNotFoundError) as e:
         sys.stderr.write(f"Import failed (attempt {attempt+1}/4), retrying in 5s: {e}\n")
@@ -89,8 +89,62 @@ class JarvisApp(QObject):
         else:
             logger.info("Launched via --startup. App initialized in system tray / minimized mode.")
 
+        # Handle auto-screenshot mode for visual verification
+        if "--auto-screenshot" in sys.argv:
+            logger.info("[AUTO-SCREENSHOT] Active: waiting for HUD to boot...")
+            self.hud.show()
+            QTimer.singleShot(4200, self._auto_screenshot_step1)
+
+        # Handle test-gate mode for quality gate verification
+        if "--test-gate" in sys.argv:
+            logger.info("[TEST-GATE] Active: waiting for HUD to boot...")
+            self.hud.show()
+            QTimer.singleShot(4200, self._test_gate_step1)
+
+        # Handle test-monitor mode for live monitoring stream verification
+        if "--test-monitor" in sys.argv:
+            logger.info("[TEST-MONITOR] Active: waiting for HUD to boot...")
+            self.hud.show()
+            QTimer.singleShot(4200, self._test_monitor_step1)
+
         # Start Engine
         self.engine.start(startup_mode=self.startup_mode)
+
+    def _auto_screenshot_step1(self):
+        logger.info("[AUTO-SCREENSHOT] Boot finished, triggering vision demo...")
+        self.hud.demo_btn.click()
+        QTimer.singleShot(5500, self._auto_screenshot_step2)
+
+    def _auto_screenshot_step2(self):
+        logger.info("[AUTO-SCREENSHOT] Vision demo finished, saving screenshot...")
+        os.makedirs("screenshots", exist_ok=True)
+        filepath = os.path.join(os.getcwd(), "screenshots", "hud_telegram.png")
+        self.hud.grab().save(filepath)
+        logger.info(f"[AUTO-SCREENSHOT] Screenshot saved to: {filepath}")
+        self.hud.exit_app()
+
+    def _test_gate_step1(self):
+        logger.info("[TEST-GATE] Boot finished, triggering wake-up via event bus...")
+        bus.wake_detected.emit("shortcut")
+        # Keep listening for 90 seconds to allow silent recording & gate activation, then exit
+        QTimer.singleShot(90000, self._test_gate_step2)
+
+    def _test_gate_step2(self):
+        logger.info("[TEST-GATE] Test duration complete, closing app...")
+        self.hud.exit_app()
+
+    def _test_monitor_step1(self):
+        logger.info("[TEST-MONITOR] Boot finished, opening config panel...")
+        self.hud.config_panel.open_panel()
+        logger.info("[TEST-MONITOR] Starting monitoring...")
+        self.hud.config_panel.start_monitoring()
+        # Keep monitoring for 5 seconds, then stop
+        QTimer.singleShot(5000, self._test_monitor_step2)
+
+    def _test_monitor_step2(self):
+        logger.info("[TEST-MONITOR] Stopping monitoring...")
+        self.hud.config_panel.stop_monitoring()
+        QTimer.singleShot(1000, self.hud.exit_app)
 
     def open_settings(self):
         if self.settings_window is None:
@@ -111,6 +165,8 @@ class JarvisApp(QObject):
 
 def main():
     logger.info("Starting JARVIS M7 OS...")
+    from core.config import config
+    logger.info(f"Loaded config: input_gain_boost_db = {config.get('input_gain_boost_db')}")
     
     import socket
     global_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

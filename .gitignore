@@ -14,3 +14,21 @@ models/
 *.zip
 *.db
 database/jarvis.db
+
+# Credentials & OAuth Tokens
+credentials.json
+token.json
+token.json.backup
+
+# Scratch, Debug, and Screenshots
+scratch/
+debug_recordings/
+screenshots/
+call to appa.txt
+
+# Android / Gradle Build files
+.gradle/
+**/build/
+**/local.properties
+**/.gradle/
+

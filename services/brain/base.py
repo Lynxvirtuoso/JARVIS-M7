@@ -2,8 +2,12 @@ from dataclasses import dataclass, field
 
 @dataclass
 class BrainResult:
-    text: str
+    text: str = ""
     provider: str = ""
+    success: bool = True
+    error: str = ""
+    error_type: str = ""
+    thinking: str = ""
     metadata: dict = field(default_factory=dict)
 
 

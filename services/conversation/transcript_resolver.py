@@ -1,0 +1,168 @@
+"""
+services/conversation/transcript_resolver.py
+Phase 1 Transcript Resolver for JARVIS M7.
+Handles wake-word position flexibility (start/middle/end), wake-word variant normalization,
+confidence scoring, sensitive action protection, and clarification question generation.
+"""
+import re
+from typing import List, Optional, Tuple
+from services.conversation.models import ResolvedTranscript
+
+
+WAKE_VARIANTS = [r"\bjarvis\b", r"\bjervis\b", r"\bjavis\b", r"\bhey jarvis\b"]
+
+SENSITIVE_KEYWORDS = {
+    "shut down", "shutdown", "exit", "restart", "delete", "remove",
+    "lock", "lock pc", "send", "payment", "account", "clear database", "format"
+}
+
+# Phonetic & misrecognition dictionary mapping pattern -> (resolved_text, is_sensitive, default_clarification)
+PHONETIC_CORRECTIONS = [
+    (
+        r"^(shadoon|shadow|shaddow|shutting)\s*(jarvis)?$",
+        "shut down",
+        True,
+        "Did you ask me to shut down?"
+    ),
+    (
+        r"^who'?s?\s+there\s*,?\s*rahman\??$",
+        "Who is A. R. Rahman?",
+        False,
+        "Did you mean, 'Who is A. R. Rahman?'"
+    ),
+    (
+        r"^open\s+cold\b",
+        "open code",
+        False,
+        "Did you mean open VS Code or Chrome?"
+    ),
+    (
+        r"^surya\s+derm[uú]\s+pono\b",
+        "system status",
+        False,
+        "Did you mean system status?"
+    )
+]
+
+
+class TranscriptResolver:
+    """
+    Resolves raw STT output into a clean, confidence-scored ResolvedTranscript.
+    Ensures wake-words at start/middle/end are properly stripped without discarding commands,
+    and requires clarification for low-confidence or sensitive requests.
+    """
+
+    def resolve(
+        self,
+        raw_text: str,
+        *,
+        stt_confidence: Optional[float] = None,
+        audio_quality: float = 1.0
+    ) -> ResolvedTranscript:
+        if not raw_text or not raw_text.strip():
+            return ResolvedTranscript(
+                raw_text="",
+                resolved_text="",
+                confidence=0.0,
+                wake_word_detected=False
+            )
+
+        text = raw_text.strip()
+        text_lower = text.lower()
+
+        # 1. Wake word position detection
+        wake_detected, wake_pos, text_without_wake = self._detect_and_strip_wake_word(text_lower, text)
+
+        cleaned_text = text_without_wake.strip()
+        if not cleaned_text and wake_detected:
+            # User just said "Jarvis" or "Jarvis?"
+            return ResolvedTranscript(
+                raw_text=text,
+                resolved_text="jarvis",
+                confidence=1.0,
+                wake_word_detected=True,
+                wake_word_position=wake_pos,
+                needs_clarification=False
+            )
+
+        # 2. Phonetic correction & low-confidence pattern matching
+        matched_correction = None
+        for pattern, resolved, is_sens, clarif_q in PHONETIC_CORRECTIONS:
+            if re.search(pattern, cleaned_text.lower()) or re.search(pattern, text_lower):
+                matched_correction = (resolved, is_sens, clarif_q)
+                break
+
+        # Calculate baseline confidence
+        base_confidence = stt_confidence if stt_confidence is not None else 0.90
+        # Reduce confidence if audio quality is degraded by clipping
+        final_confidence = base_confidence * min(1.0, max(0.2, audio_quality))
+
+        if matched_correction:
+            resolved_text, is_sensitive, clarification_question = matched_correction
+            # Phonetic misrecognitions like 'Shadoon Jarvis' are inherently uncertain (medium/low confidence)
+            resolved_confidence = min(0.65, final_confidence)
+            return ResolvedTranscript(
+                raw_text=text,
+                resolved_text=resolved_text,
+                confidence=resolved_confidence,
+                wake_word_detected=wake_detected,
+                wake_word_position=wake_pos,
+                needs_clarification=True,
+                clarification_question=clarification_question,
+                is_sensitive_action=is_sensitive
+            )
+
+        # Check general sensitive action keywords
+        is_sensitive = any(kw in cleaned_text.lower() for kw in SENSITIVE_KEYWORDS)
+
+        # Decision thresholding
+        needs_clarification = False
+        clarification_question = None
+
+        if is_sensitive and final_confidence < 0.85:
+            needs_clarification = True
+            clarification_question = f"Did you ask me to {cleaned_text}?"
+        elif final_confidence < 0.40:
+            needs_clarification = True
+            clarification_question = f"Sorry Sir, I am not sure I understood: '{cleaned_text}'. Could you repeat that?"
+
+        return ResolvedTranscript(
+            raw_text=text,
+            resolved_text=cleaned_text if cleaned_text else text,
+            confidence=final_confidence,
+            wake_word_detected=wake_detected,
+            wake_word_position=wake_pos,
+            needs_clarification=needs_clarification,
+            clarification_question=clarification_question,
+            is_sensitive_action=is_sensitive
+        )
+
+    def _detect_and_strip_wake_word(self, text_lower: str, original_text: str) -> Tuple[bool, Optional[str], str]:
+        """
+        Detects wake word at start, middle, or end of string and strips it cleanly.
+        """
+        # Wake at start
+        start_pattern = r"^(hey\s+)?(jarvis|jervis|javis)[,\s]*"
+        if re.search(start_pattern, text_lower):
+            stripped = re.sub(start_pattern, "", original_text, flags=re.IGNORECASE).strip()
+            return True, "start", stripped
+
+        # Wake at end
+        end_pattern = r"[,\s]*(hey\s+)?(jarvis|jervis|javis)[\?\.]?$"
+        if re.search(end_pattern, text_lower):
+            stripped = re.sub(end_pattern, "", original_text, flags=re.IGNORECASE).strip()
+            return True, "end", stripped
+
+        # Wake in middle
+        middle_pattern = r"\b(hey\s+)?(jarvis|jervis|javis)\b"
+        if re.search(middle_pattern, text_lower):
+            stripped = re.sub(middle_pattern, "", original_text, flags=re.IGNORECASE).strip()
+            # Clean double spaces
+            stripped = re.sub(r"\s+", " ", stripped).strip()
+            return True, "middle", stripped
+
+        return False, None, original_text
+
+
+# Global resolver instance
+transcript_resolver = TranscriptResolver()

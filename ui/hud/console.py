@@ -1,77 +1,68 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QColor, QFont, QTextCursor
-from core.event_bus import bus
+"""
+ui/hud/console.py
+HUD raw developer console feed promoted to a detachable module.
+"""
+from PyQt6.QtWidgets import QPlainTextEdit, QSizePolicy
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QTextCursor
 
-class ConsoleWidget(QWidget):
+from core.event_bus import bus
+from ui.hud.panels import HUDCollapsiblePanel
+from ui.hud.theme import COLOR_CYAN, COLOR_CYAN_DIM, COLOR_TEXT, get_mono_family
+
+
+class ConsoleWidget(HUDCollapsiblePanel):
     """
-    HUD console feed. Shows live application logs, transcribed commands,
-    responses, and system states.
+    Developer Console Module.
+    Subscribes to bus.console_log and displays raw application logging.
+    Can be floated or resized.
     """
     def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
-        
-        # Header label
-        self.header = QLabel("SYSTEM FEED LOG", self)
-        self.header.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        self.header.setStyleSheet("color: #00bfff; letter-spacing: 1px;")
-        layout.addWidget(self.header)
-        
-        # Text display
-        self.text_area = QPlainTextEdit(self)
-        self.text_area.setReadOnly(True)
-        self.text_area.setFont(QFont("Consolas", 9))
-        self.text_area.setMaximumBlockCount(200) # Prevents memory leaks
-        
-        # Cyberpunk style stylesheet
-        self.text_area.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: rgba(10, 15, 28, 180);
-                border: 1px solid #00bfff;
-                border-radius: 4px;
-                color: #ffffff;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: rgba(10, 15, 28, 50);
-                width: 6px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: #00bfff;
-                min-height: 20px;
-                border-radius: 3px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-            }
-        """)
-        layout.addWidget(self.text_area)
-        
-        # Connect to event bus
-        bus.console_log.connect(self.append_log)
-        
-        # Initial greeting in the feed
-        self.append_log("INFO", "Initializing system modules...")
-        self.append_log("INFO", "Event bus listening on channel JARVIS-MAIN.")
+        super().__init__("DEV CONSOLE", parent, module_id="dev_console")
 
-    def append_log(self, level, message):
+        self.text_area = QPlainTextEdit(self.body)
+        self.text_area.setReadOnly(True)
+        self.text_area.setFont(QFont(get_mono_family(), 9))
+        self.text_area.setMaximumBlockCount(150)
+        self.text_area.setFixedHeight(120)
+        self.text_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.text_area.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: #050A0F;
+                border: 1px solid #142834;
+                color: {COLOR_TEXT};
+            }}
+            QScrollBar:vertical {{
+                border: none; background: #050B14; width: 3px; margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {COLOR_CYAN_DIM}; min-height: 14px; border-radius: 1px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none; background: none;
+            }}
+        """)
+        self.body_layout.addWidget(self.text_area)
+
+        # Wire up bus
+        bus.console_log.connect(self.append_log)
+
+        # Seed initial log lines
+        self.append_log("INFO", "Developer console active.")
+
+    def append_log(self, level: str, message: str):
         color = "#ffffff"
         if level == "ERROR":
-            color = "#ff4c4c"
-        elif level == "WARN" or level == "WARNING":
-            color = "#ffa500"
+            color = "#FF5555"
+        elif level in ("WARN", "WARNING"):
+            color = "#FFB454"
         elif level == "INFO":
-            color = "#00bfff"
+            color = COLOR_CYAN
         elif level == "SUCCESS":
-            color = "#00ff7f"
-            
-        html_msg = f'<font color="{color}">[{level}]</font> {message}'
+            color = "#55FF55"
+
+        html_msg = f'<font color="{color}">[{level[:4]}]</font> <font color="#A5C6D0">{message}</font>'
         self.text_area.appendHtml(html_msg)
-        
-        # Auto scroll to bottom
+
+        # Auto scroll
         self.text_area.moveCursor(QTextCursor.MoveOperation.End)

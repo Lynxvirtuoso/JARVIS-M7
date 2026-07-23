@@ -1,93 +1,93 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
+"""
+ui/hud/stats_widget.py
+CPU / RAM / DISK circular ring gauges — updated to use HUD theme colors.
+"""
+import psutil
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QVBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont
-import psutil
+
+from ui.hud.theme import BG_VOID, COLOR_TEXT, get_mono_family
+
 
 class StatRing(QWidget):
-    """Circular ring gauge showing percentage of a system stat."""
-    def __init__(self, label="CPU", color=QColor(0, 191, 255), parent=None):
+    """Circular donut gauge showing a percentage with label."""
+    def __init__(self, label: str, color: QColor, parent=None):
         super().__init__(parent)
-        self.label = label
-        self.color = color
-        self.percentage = 0.0
-        self.setMinimumSize(80, 80)
-        self.setMaximumSize(120, 120)
+        self.label      = label
+        self.color      = color
+        self._pct       = 0.0
+        self.setFixedSize(68, 68)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
 
-    def set_percentage(self, val):
-        self.percentage = max(0.0, min(float(val), 100.0))
+    def set_percentage(self, val: float):
+        self._pct = max(0.0, min(float(val), 100.0))
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        width = self.width()
-        height = self.height()
-        center = QPointF(width / 2.0, height / 2.0)
-        radius = min(width, height) / 2.0 - 8
-        
-        # 1. Background ring (faint)
-        bg_pen = QPen(QColor(self.color.red(), self.color.green(), self.color.blue(), 30))
-        bg_pen.setWidth(6)
-        painter.setPen(bg_pen)
-        painter.drawEllipse(center, radius, radius)
-        
-        # 2. Foreground percentage arc
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor(BG_VOID))
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        r = min(self.width(), self.height()) / 2.0 - 7
+
+        # Track ring
+        bg_pen = QPen(QColor(self.color.red(), self.color.green(), self.color.blue(), 28))
+        bg_pen.setWidth(5)
+        p.setPen(bg_pen)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+        # Progress arc
         fg_pen = QPen(self.color)
-        fg_pen.setWidth(6)
+        fg_pen.setWidth(5)
         fg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(fg_pen)
-        
-        # SAPI coordinates start at 3 o'clock (0 degrees), we start at 12 o'clock (90 degrees) and rotate clockwise (negative)
-        start_angle = 90 * 16
-        span_angle = int(-self.percentage * 3.6 * 16)
-        
-        painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            int(radius * 2), int(radius * 2),
-            start_angle, span_angle
+        p.setPen(fg_pen)
+        span = int(-self._pct * 3.6 * 16)
+        p.drawArc(
+            int(cx - r), int(cy - r), int(r * 2), int(r * 2),
+            90 * 16, span
         )
-        
-        # 3. Label text (e.g. "CPU 45%")
-        painter.setPen(QColor(255, 255, 255, 220))
-        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        text_rect = self.rect()
-        # Adjust text center slightly downwards
-        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, f"{int(self.percentage)}%\n{self.label}")
 
-class StatsWidget(QWidget):
-    """HUD sidebar displaying real-time CPU, RAM, and Disk metrics."""
+        # Centre text
+        p.setPen(QColor(COLOR_TEXT))
+        p.setFont(QFont(get_mono_family(), 8, QFont.Weight.Bold))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                   f"{int(self._pct)}%\n{self.label}")
+
+
+from ui.hud.panels import HUDCollapsiblePanel
+
+class StatsWidget(HUDCollapsiblePanel):
+    """Row of three StatRings: CPU (cyan), RAM (green), DISK (amber) — now collapsible & detachable."""
     def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(15)
-        
-        self.cpu_ring = StatRing("CPU", QColor(0, 191, 255), self)
-        self.ram_ring = StatRing("RAM", QColor(0, 255, 127), self)
-        self.disk_ring = StatRing("DISK", QColor(255, 165, 0), self)
-        
-        layout.addWidget(self.cpu_ring)
-        layout.addWidget(self.ram_ring)
-        layout.addWidget(self.disk_ring)
-        
-        # Update timer (every 1 second)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.poll_stats)
-        self.timer.start(1000)
-        
-        # Initial poll
-        self.poll_stats()
+        super().__init__("SYSTEM PERFORMANCE", parent, module_id="system_performance")
 
-    def poll_stats(self):
-        # Heavy work should be delegated to system monitor service, but quick psutil queries are non-blocking on Windows
+        inner = QWidget(self.body)
+        inner.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        layout = QHBoxLayout(inner)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(15)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        self.cpu_ring  = StatRing("CPU",  QColor(79,  227, 255), inner)
+        self.ram_ring  = StatRing("RAM",  QColor(0,   230, 118), inner)
+        self.disk_ring = StatRing("DISK", QColor(255, 180, 84),  inner)
+
+        for ring in (self.cpu_ring, self.ram_ring, self.disk_ring):
+            layout.addWidget(ring)
+
+        self.body_layout.addWidget(inner)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(1500)
+        self._poll()
+
+    def _poll(self):
         try:
-            cpu = psutil.cpu_percent()
-            ram = psutil.virtual_memory().percent
-            disk = psutil.disk_usage('C:\\').percent
-            
-            self.cpu_ring.set_percentage(cpu)
-            self.ram_ring.set_percentage(ram)
-            self.disk_ring.set_percentage(disk)
+            self.cpu_ring.set_percentage(psutil.cpu_percent())
+            self.ram_ring.set_percentage(psutil.virtual_memory().percent)
+            self.disk_ring.set_percentage(psutil.disk_usage("C:\\").percent)
         except Exception:
-            pass # Keep previous stats on transient errors
+            pass

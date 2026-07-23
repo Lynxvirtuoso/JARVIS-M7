@@ -3,12 +3,61 @@ import re
 import queue
 import time
 import threading
+import wave
 import numpy as np
 import sounddevice as sd
 from difflib import SequenceMatcher
 from core.event_bus import bus
 from core.logger import logger
 from core.config import config
+
+# ===========================================================================
+# TEMPORARY DEBUGGING FEATURE: Session-wide audio recording
+# ===========================================================================
+DEBUG_SESSION_RECORDING = True
+DEBUG_RECORDING_DIR = r"d:\JARVIS M7\debug_recordings"
+
+class SessionAudioRecorder:
+    def __init__(self):
+        self.wav_file = None
+        self.filename = None
+
+    def start_session(self):
+        if not DEBUG_SESSION_RECORDING:
+            return
+        try:
+            os.makedirs(DEBUG_RECORDING_DIR, exist_ok=True)
+            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            self.filename = os.path.join(DEBUG_RECORDING_DIR, f"session_{timestamp}.wav")
+            self.wav_file = wave.open(self.filename, "wb")
+            self.wav_file.setnchannels(1)
+            self.wav_file.setsampwidth(2) # 16-bit PCM
+            self.wav_file.setframerate(16000)
+            logger.info(f"[DEBUG] Started session recording: {self.filename}")
+        except Exception as e:
+            logger.error(f"[DEBUG] Failed to start session recording: {e}")
+
+    def write_chunk(self, chunk):
+        if not DEBUG_SESSION_RECORDING or self.wav_file is None:
+            return
+        try:
+            # chunk is float32 numpy array. Convert to 16-bit PCM bytes
+            audio_data = (chunk * 32767).astype(np.int16)
+            self.wav_file.writeframes(audio_data.tobytes())
+        except Exception as e:
+            logger.error(f"[DEBUG] Failed to write session chunk: {e}")
+
+    def stop_session(self):
+        if not DEBUG_SESSION_RECORDING or self.wav_file is None:
+            return
+        try:
+            self.wav_file.close()
+            logger.info(f"[DEBUG] Stopped and saved session recording: {self.filename}")
+        except Exception as e:
+            logger.error(f"[DEBUG] Failed to stop session recording: {e}")
+        finally:
+            self.wav_file = None
+            self.filename = None
 
 try:
     from faster_whisper import WhisperModel
@@ -172,12 +221,15 @@ class AudioService(threading.Thread):
         self.sample_rate = 16000
         self.chunk_size = 1024
         self.audio_queue = queue.Queue()
+        self.session_recorder = SessionAudioRecorder()
         
         # State tracking (mirrors engine state via event bus)
         self.current_state = "INITIALIZING"
         self.current_stream = None
         self.stream_active = True
         self.active_sample_rate = 16000
+        self.is_suspended = False
+        self.suspend_event = threading.Event()
         
         # Ambient noise calibration
         self.ambient_rms = 0.01
@@ -196,6 +248,8 @@ class AudioService(threading.Thread):
         # Voice wake phrase parameters
         self.wake_voice_buffer = []
         self.is_transcribing_wake = False
+        self.is_collecting_wake = False
+        self.wake_silence_counter = 0
         
         # TTS Interruption parameters (entirely separate from wake/command)
         self.interrupt_voice_buffer = []
@@ -219,12 +273,13 @@ class AudioService(threading.Thread):
     def silence_threshold(self):
         """Dynamic silence threshold based on ambient noise calibration."""
         base = float(config.get("command_sensitivity", "0.015"))
-        # At least 2x ambient noise, but not less than base
-        return max(base, self.ambient_rms * 2.0)
+        # At least 3.5x ambient noise, but not less than base
+        return max(base, self.ambient_rms * 3.5)
     
     @property
     def wake_trigger_threshold(self):
-        return max(self.ambient_rms * 2.5, float(config.get("wake_sensitivity", "0.05")))
+        # At least 4.0x ambient noise, but not less than base sensitivity
+        return max(self.ambient_rms * 4.0, float(config.get("wake_sensitivity", "0.03")))
     
     @property
     def wake_word_enabled(self):
@@ -269,6 +324,10 @@ class AudioService(threading.Thread):
             self.is_collecting_wake = False
             self.wake_voice_buffer = []
             logger.info(f"Command listening active ({state}). Waiting for user command.")
+            
+            # Start continuous debug recording session if not already started
+            if self.session_recorder.wav_file is None:
+                self.session_recorder.start_session()
 
         elif state == "PASSIVE_WAKE_LISTENING":
             # Reset wake collection state
@@ -312,7 +371,17 @@ class AudioService(threading.Thread):
         if not input_devices:
             raise RuntimeError("No input audio recording devices found on this system.")
         
-        # Priority 1: User-configured device
+        # Priority 1: User-configured device by index first, then name/backend
+        saved_index = config.get("selected_microphone_index")
+        if saved_index is not None:
+            try:
+                idx = int(saved_index)
+                for dev in input_devices:
+                    if dev["index"] == idx:
+                        return dev["index"], dev["name"], dev["backend"]
+            except ValueError:
+                pass
+
         saved_name = config.get("mic_device_name")
         saved_backend = config.get("mic_device_backend")
         if saved_name:
@@ -328,14 +397,16 @@ class AudioService(threading.Thread):
                 d = devices[default_idx]
                 name = d.get("name")
                 backend = hostapis[d.get("hostapi")]["name"]
-                virtuals = ["wo mic", "audiorelay", "virtual mic", "stereo mix", "loopback", "steam", "nvidia"]
+                virtuals = ["wo mic", "audiorelay", "virtual mic", "stereo mix", "loopback", "steam", "nvidia",
+                            "sound mapper", "microsoft sound mapper"]
                 if not any(v in name.lower() for v in virtuals):
                     return default_idx, name, backend
         except Exception:
             pass
         
         # Priority 3: Score-based selection
-        virtuals = ["wo mic", "audiorelay", "virtual mic", "stereo mix", "loopback", "steam", "nvidia"]
+        virtuals = ["wo mic", "audiorelay", "virtual mic", "stereo mix", "loopback", "steam", "nvidia",
+                    "sound mapper", "microsoft sound mapper"]
         scored = []
         for dev in input_devices:
             nl = dev["name"].lower()
@@ -356,6 +427,10 @@ class AudioService(threading.Thread):
         self.stream_active = True
         
         while self.stream_active:
+            if self.is_suspended:
+                self.suspend_event.wait(timeout=0.5)
+                continue
+
             try:
                 device_idx, device_name, backend_name = self.select_best_microphone()
                 device_info = sd.query_devices(device_idx)
@@ -391,8 +466,11 @@ class AudioService(threading.Thread):
                 
                 with self.current_stream:
                     logger.info("Listening...")
-                    # Ambient noise calibration (2 seconds)
-                    self._calibrate_ambient()
+                    # Ambient noise calibration (2 seconds) - skip if already calibrated to preserve noise floor
+                    if not self.calibrated:
+                        self._calibrate_ambient()
+                    else:
+                        logger.info("Resuming listening without recalibrating ambient noise floor.")
                     
                     while self.current_stream is not None:
                         try:
@@ -420,7 +498,7 @@ class AudioService(threading.Thread):
         if samples:
             self.ambient_rms = np.mean(samples)
             self.calibrated = True
-            logger.info(f"Ambient noise calibration complete. Noise floor RMS: {self.ambient_rms:.4f}")
+            logger.info(f"Ambient noise calibration complete. Noise floor RMS: {self.ambient_rms:.6f}")
         else:
             self.ambient_rms = 0.01
             logger.warn("Ambient calibration failed (no samples). Using default noise floor.")
@@ -441,11 +519,28 @@ class AudioService(threading.Thread):
             try: self.audio_queue.get_nowait()
             except queue.Empty: break
 
+    def suspend_listening(self):
+        """Temporarily suspend microphone stream for live monitor test."""
+        if not self.is_suspended:
+            logger.info("Suspending main always-listening microphone thread...")
+            self.is_suspended = True
+            self.suspend_event.clear()
+            self.restart_stream()
+
+    def resume_listening(self):
+        """Resume normal microphone wake-word listening."""
+        if self.is_suspended:
+            logger.info("Resuming main always-listening microphone thread...")
+            self.is_suspended = False
+            self.suspend_event.set()
+
     def stop(self):
         """Cleanly stop the audio service thread and stream."""
         logger.info("Stopping microphone audio service thread...")
         self.stream_active = False
         self.restart_stream()
+        if hasattr(self, "session_recorder"):
+            self.session_recorder.stop_session()
 
     # -- Core audio processing -----------------------------------------------
     def process_audio_chunk(self, chunk):
@@ -453,6 +548,10 @@ class AudioService(threading.Thread):
         
         # Always send mic level to GUI
         bus.system_stats_updated.emit({"mic_level": float(rms)})
+
+        # [TEMPORARY DEBUG] Record session chunk continuously during active session
+        if hasattr(self, "session_recorder") and self.session_recorder.wav_file is not None:
+            self.session_recorder.write_chunk(chunk)
         
         # ---- Self-hearing prevention & TTS interrupt detection ----
         from services.speech_service import speech
@@ -488,7 +587,15 @@ class AudioService(threading.Thread):
 
             if rms > self.silence_threshold:
                 self.command_has_speech = True
-                logger.info(f"Command voice detected. RMS: {rms:.4f}")
+                dev_info = ""
+                if self.current_stream:
+                    try:
+                        import sounddevice as sd
+                        info = sd.query_devices(self.current_stream.device)
+                        dev_info = f" (Device Index: {self.current_stream.device}, Name: {info['name']})"
+                    except Exception:
+                        dev_info = f" (Device Index: {self.current_stream.device})"
+                logger.info(f"Command voice detected. RMS: {rms:.4f}{dev_info}")
                 # Notify engine — it will transition ACTIVE_COMMAND_LISTENING → COMMAND_RECORDING
                 # and cancel the command-listening timeout.
                 bus.command_recording_started.emit()
@@ -687,10 +794,31 @@ class AudioService(threading.Thread):
         audio_data = np.concatenate(buffer, axis=0).flatten()
         duration = len(buffer) * (self.chunk_size / self.sample_rate)
 
-        # Calculate RMS and Peak levels
+        # Calculate chunk-based RMS to find the voiced segment's peak level (sliding 500ms window)
+        chunk_rms_values = [np.sqrt(np.mean(c**2)) for c in buffer]
+        window_size = min(8, len(chunk_rms_values))
+        if window_size > 0:
+            sliding_rms = []
+            for i in range(len(chunk_rms_values) - window_size + 1):
+                window_mean_square = np.mean([r**2 for r in chunk_rms_values[i:i+window_size]])
+                sliding_rms.append(np.sqrt(window_mean_square))
+            raw_rms = max(sliding_rms) if sliding_rms else 0.0
+        else:
+            raw_rms = 0.0
+
         avg_rms = np.sqrt(np.mean(audio_data**2))
-        raw_rms = avg_rms
         peak_val = np.max(np.abs(audio_data))
+
+        # Pre-STT audio quality gate check (discard if raw_rms is close to calibrated ambient floor)
+        rms_margin = raw_rms - self.ambient_rms
+        if rms_margin < 0.025:
+            logger.warning(
+                f"Audio quality gate triggered: raw_rms ({raw_rms:.6f}) - ambient_rms ({self.ambient_rms:.6f}) "
+                f"= {rms_margin:.6f} which is below min_margin 0.025. Skipping STT."
+            )
+            bus.console_log.emit("WARN", "Command skipped: audio level too close to noise floor")
+            bus.command_transcription_failed.emit("audio too close to noise floor")
+            return
 
         logger.info(
             f"\nCommand recording started\n"
@@ -701,49 +829,37 @@ class AudioService(threading.Thread):
             f"Peak level: {peak_val:.4f}\n"
         )
 
-        # Normalize audio volume safely
-        if peak_val > 0:
-            audio_data = audio_data / peak_val * 0.9
-            logger.info("Command audio volume normalized to -1dB safely.")
+        # Safe audio volume processing & peak scaling
+        orig_peak = float(np.max(np.abs(audio_data)))
+        orig_rms = float(np.sqrt(np.mean(audio_data**2)))
+        is_clipped = bool(orig_peak >= 0.98)
+        audio_quality = 1.0
 
-        # Re-verify post-normalization RMS
-        avg_rms = np.sqrt(np.mean(audio_data**2))
+        if orig_peak > 1.0:
+            # Overloaded/clipped input -> do NOT amplify, scale down safely
+            audio_data = audio_data / orig_peak * 0.95
+            clip_severity = orig_peak - 1.0
+            audio_quality = max(0.3, 1.0 - clip_severity * 1.5)
+            logger.warning(f"Audio clipping detected (peak: {orig_peak:.4f}). Scaled down to 0.95. Quality factor: {audio_quality:.2f}")
+        elif orig_peak > 0.0 and orig_peak < 0.9:
+            gain = min(0.9 / orig_peak, 2.5)
+            audio_data = audio_data * gain
+
+        audio_data = np.clip(audio_data, -1.0, 1.0)
+        proc_peak = float(np.max(np.abs(audio_data)))
+        proc_rms = float(np.sqrt(np.mean(audio_data**2)))
+
+        logger.info(
+            f"\nCommand audio processed:\n"
+            f"Original RMS: {orig_rms:.4f} | Original Peak: {orig_peak:.4f} | Clipped: {is_clipped}\n"
+            f"Processed RMS: {proc_rms:.4f} | Processed Peak: {proc_peak:.4f} | Quality factor: {audio_quality:.2f}\n"
+        )
 
         # Store diagnostics parameters
         self.last_raw_rms = raw_rms
-        self.last_avg_rms = avg_rms
-        self.last_peak_val = peak_val
+        self.last_avg_rms = proc_rms
+        self.last_peak_val = proc_peak
         self.last_duration = duration
-
-        # Perform Audio Quality check (log/warn only — do not block transcription)
-        is_low_quality = False
-        quality_reason = []
-        if avg_rms < 0.003:
-            is_low_quality = True
-            quality_reason.append("very low RMS")
-        if peak_val >= 0.99:
-            is_low_quality = True
-            quality_reason.append("clipping")
-        if self.ambient_rms > 0.02:
-            is_low_quality = True
-            quality_reason.append("high background noise")
-        if duration < 0.8:
-            is_low_quality = True
-            quality_reason.append("duration too short")
-
-        if is_low_quality:
-            reasons = ", ".join(quality_reason)
-            logger.warning(f"Audio quality is low: {reasons}.")
-            bus.console_log.emit("WARN", f"Audio quality warning: {reasons}")
-            # NOTE: engine will speak the failure message if transcription returns empty.
-            # We do NOT call speech.speak() here — that is the engine's responsibility.
-
-        # Validate low RMS warn but do not reject automatically
-        if avg_rms < 0.015:
-            self.last_diagnostics_warning = "Mic level low. Increase input gain or speak closer, Sir."
-            bus.console_log.emit("WARN", self.last_diagnostics_warning)
-        else:
-            self.last_diagnostics_warning = None
 
         transcription = ""
         try:
@@ -754,30 +870,172 @@ class AudioService(threading.Thread):
             sf.write(wav_io, audio_data, 16000, format='WAV', subtype='PCM_16')
             wav_bytes = wav_io.getvalue()
 
-            # Stronger prompt: includes session prefix vocabulary and Indian-English guidance
-            initial_prompt = (
-                "This is a Windows desktop assistant command spoken by the user. "
-                "The assistant is named Jarvis. Commands start with the word Jarvis (or Jervis, Javis, Charvis). "
-                "Common commands: Jarvis open Chrome, Jarvis open Notepad, Jarvis open VS Code, "
-                "Jarvis close Jarvis, Jarvis sleep, Jarvis standby, Jarvis hide HUD, Jarvis exit app, "
-                "Jarvis fully shutdown, Jarvis increase volume, Jarvis decrease volume, Jarvis mute volume, "
-                "Jarvis take screenshot, Jarvis open file explorer, Jarvis open downloads, "
-                "Jarvis what time is it, Jarvis play music, Jarvis stop music, Jarvis lock computer. "
-                "Transcribe clearly, including the word Jarvis at the start."
+            from services.stt.prompt_builder import stt_prompt_builder
+            initial_prompt = stt_prompt_builder.build_prompt(
+                mode="active_command",
+                relevant_apps=["Google Chrome", "Visual Studio Code", "Notepad", "Settings"]
             )
-
-            # Use language/beam_size/temperature from config for accent tuning
             stt_lang = config.get("stt_language", "en")
 
+            import time
+            stt_start_time = time.monotonic()
             from services.stt.provider_manager import stt_manager
+            logger.info(f"STT API Call initial_prompt payload: '{initial_prompt}'")
             stt_result = stt_manager.transcribe(
                 wav_bytes,
                 audio_format="wav",
                 language=stt_lang,
                 initial_prompt=initial_prompt
             )
-            transcription = stt_result.text
-            logger.info(f"Raw transcription: '{transcription}' (via {stt_result.provider})")
+            stt_latency = time.monotonic() - stt_start_time
+            bus.system_stats_updated.emit({"stt_latency": round(stt_latency, 2)})
+            
+            raw_text = stt_result.text
+            from services.phonetic_correction_service import phonetic_correction_service
+            transcription = phonetic_correction_service.correct_transcription(raw_text)
+            if transcription != raw_text:
+                logger.info(f"Phonetic correction applied: '{raw_text}' -> '{transcription}'")
+            else:
+                logger.info(f"Raw transcription: '{transcription}' (via {stt_result.provider}) in {stt_latency:.2f}s")
+
+            # Two-pass STT re-transcription logic for contact/call commands
+            try:
+                from skills.call_skill import CallSkill
+                if CallSkill.has_call_intent_static(transcription):
+                    target = CallSkill.extract_call_target_static(transcription)
+                    if target:
+                        from services.contacts_service import contacts_service
+                        res = contacts_service.resolve_contact(target)
+                        if res["status"] != "resolved":
+                            logger.info(
+                                f"First-pass STT calling intent target '{target}' did not resolve confidently "
+                                f"(status={res['status']}). Performing second-pass phonetic STT..."
+                            )
+                            # Fetch all contact names (preferring display overrides)
+                            with db.get_connection() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute("SELECT COALESCE(display_override, name) FROM contacts")
+                                all_contact_names = [row[0] for row in cursor.fetchall() if row[0]]
+                            
+                            # Find top 15 phonetically-plausible candidates using difflib.SequenceMatcher
+                            candidates = []
+                            target_clean = target.lower().strip()
+                            for c_name in all_contact_names:
+                                c_clean = c_name.lower().strip()
+                                max_ratio = SequenceMatcher(None, target_clean, c_clean).ratio()
+                                # Split and check individual tokens
+                                tokens = re.split(r"[\s\-_&]+", c_clean)
+                                for token in tokens:
+                                    if len(token) >= 3:
+                                        r = SequenceMatcher(None, target_clean, token).ratio()
+                                        if r > max_ratio:
+                                            max_ratio = r
+                                candidates.append((c_name, max_ratio))
+                            candidates.sort(key=lambda x: x[1], reverse=True)
+                            top_names = [c[0] for c in candidates[:15]]
+                            
+                            # Build targeted second-pass prompt
+                            second_biasing_names = []
+                            for name in top_names:
+                                words = re.split(r"[\s\-_&]+", name)
+                                for w in words:
+                                    cleaned = re.sub(r"[^\w]", "", w).strip()
+                                    if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
+                                        second_biasing_names.append(cleaned)
+                                        
+                            second_prompt = (
+                                "Jarvis desktop assistant command. "
+                                "Common: open Chrome, open Notepad, open VS Code, exit app, screenshot, play/stop music, lock computer. "
+                                "Transcribe clearly, including 'Jarvis' (or Jervis, Javis) at the start."
+                            )
+                            if second_biasing_names:
+                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
+                            
+                            logger.info(f"Second-pass STT initial_prompt: {second_prompt}")
+                            stt_result_second = stt_manager.transcribe(
+                                wav_bytes,
+                                audio_format="wav",
+                                language=stt_lang,
+                                initial_prompt=second_prompt
+                            )
+                            raw_second = stt_result_second.text
+                            transcription_second = phonetic_correction_service.correct_transcription(raw_second)
+                            if transcription_second != raw_second:
+                                logger.info(f"Second-pass phonetic correction applied: '{raw_second}' -> '{transcription_second}'")
+                            else:
+                                logger.info(f"Second-pass transcription: '{transcription_second}' (via {stt_result_second.provider})")
+                            transcription = transcription_second
+            except Exception as two_pass_err:
+                logger.error(f"Two-pass STT re-transcription failed: {two_pass_err}", exc_info=True)
+
+            # Two-pass STT re-transcription logic for raga commands
+            try:
+                from core.engine import JarvisEngine
+                from skills.raga_skill import RagaSkill
+                engine = JarvisEngine._instance
+                if RagaSkill.has_raga_intent_static(transcription, engine=engine):
+                    target = RagaSkill.extract_raga_target_static(transcription)
+                    if target:
+                        from services.ragas_service import ragas_service
+                        res = ragas_service.resolve_raga(target)
+                        if res["status"] == "no_match":
+                            logger.info(
+                                f"First-pass STT raga query target '{target}' did not resolve. "
+                                f"Performing second-pass phonetic STT for ragas..."
+                            )
+                            with db.get_connection() as conn:
+                                cursor = conn.cursor()
+                                cursor.execute("SELECT name FROM ragas")
+                                all_raga_names = [row[0] for row in cursor.fetchall() if row[0]]
+                            candidates = []
+                            target_clean = target.lower().strip()
+                            for r_name in all_raga_names:
+                                import unicodedata
+                                normalized = unicodedata.normalize('NFKD', r_name)
+                                ascii_name = "".join([c for c in normalized if not unicodedata.combining(c)])
+                                r_clean = ascii_name.lower().strip()
+                                max_ratio = SequenceMatcher(None, target_clean, r_clean).ratio()
+                                tokens = re.split(r"[\s\-_&]+", r_clean)
+                                for token in tokens:
+                                    if len(token) >= 3:
+                                        r = SequenceMatcher(None, target_clean, token).ratio()
+                                        if r > max_ratio:
+                                            max_ratio = r
+                                candidates.append((ascii_name, max_ratio))
+                            candidates.sort(key=lambda x: x[1], reverse=True)
+                            top_names = [c[0] for c in candidates[:15]]
+                            
+                            second_biasing_names = []
+                            for name in top_names:
+                                words = re.split(r"[\s\-_&]+", name)
+                                for w in words:
+                                    cleaned = re.sub(r"[^\w]", "", w).strip()
+                                    if cleaned.isalpha() and len(cleaned) >= 3 and cleaned not in second_biasing_names:
+                                        second_biasing_names.append(cleaned)
+                                        
+                            second_prompt = (
+                                "Music Space raga database search. "
+                                "Transcribe music and raga terms clearly: arohana, avarohana, melakarta, scale, tradition."
+                            )
+                            if second_biasing_names:
+                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
+                            
+                            logger.info(f"Second-pass Raga STT initial_prompt: {second_prompt}")
+                            stt_result_second = stt_manager.transcribe(
+                                wav_bytes,
+                                audio_format="wav",
+                                language=stt_lang,
+                                initial_prompt=second_prompt
+                            )
+                            raw_second = stt_result_second.text
+                            transcription_second = phonetic_correction_service.correct_transcription(raw_second)
+                            if transcription_second != raw_second:
+                                logger.info(f"Second-pass raga phonetic correction applied: '{raw_second}' -> '{transcription_second}'")
+                            else:
+                                logger.info(f"Second-pass raga transcription: '{transcription_second}' (via {stt_result_second.provider})")
+                            transcription = transcription_second
+            except Exception as raga_two_pass_err:
+                logger.error(f"Raga two-pass STT re-transcription failed: {raga_two_pass_err}", exc_info=True)
         except Exception as e:
             logger.error(f"All STT providers failed. Error: {e}")
             bus.console_log.emit("ERROR", "All STT providers failed.")
@@ -858,35 +1116,32 @@ class AudioService(threading.Thread):
             transcription = " ".join([s.text for s in segments]).strip()
             logger.info(f"Interrupt listener transcription: {transcription!r}")
             
-            # Clean full transcription for absolute exact bare word check
-            import re
-            cleaned_full = transcription.lower().strip()
-            cleaned_full = re.sub(r"[.,!?;:'\"]+", "", cleaned_full).strip()
+            from services.speech_service import speech
+            from services.conversation.echo_rejector import echo_rejector
+            from services.tts.streaming_tts_queue import streaming_tts_queue
             
-            from core.engine import JarvisEngine
-            has_prefix, remainder = JarvisEngine.strip_session_prefix(transcription)
+            req_id = getattr(streaming_tts_queue, "active_request_id", None)
+            curr_sentence = getattr(speech, "current_spoken_sentence", "")
+            recent_sentences = getattr(speech, "recent_spoken_sentences", [])
+
+            is_echo_talk = echo_rejector.is_echo(
+                transcription,
+                curr_sentence,
+                recent_sentences,
+                request_id=req_id
+            )
+
+            if is_echo_talk:
+                logger.info(f"Self-hearing echo discarded for transcript: '{transcription[:30]}...'")
+                return
+
+            from services.tts.provider_manager import tts_manager
+            tts_manager.stop_speaking()
             
-            trigger_interrupt = False
+            latency = time.time() - utterance_end_time
+            logger.info(f"INTERRUPT LATENCY: {latency:.4f} seconds from end of utterance to playback halt.")
             
-            # Case (a): Prefix + stop/cancel (e.g. "Jarvis stop", "Jarvis cancel")
-            if has_prefix:
-                cleaned_rem = remainder.lower().strip()
-                cleaned_rem = re.sub(r"[.,!?;:'\"]+", "", cleaned_rem).strip()
-                if cleaned_rem in ("stop", "cancel"):
-                    trigger_interrupt = True
-            
-            # Case (b): Entire cleaned transcription is exactly "stop" or "cancel" (no prefix)
-            if cleaned_full in ("stop", "cancel"):
-                trigger_interrupt = True
-                
-            if trigger_interrupt:
-                from services.tts.provider_manager import tts_manager
-                tts_manager.stop_speaking()
-                
-                latency = time.time() - utterance_end_time
-                logger.info(f"INTERRUPT LATENCY: {latency:.4f} seconds from end of utterance to playback halt.")
-                
-                bus.speech_interrupted.emit()
+            bus.speech_interrupted.emit()
         except Exception as e:
             logger.error(f"Error in _transcribe_interrupt: {e}", exc_info=True)
         finally:
