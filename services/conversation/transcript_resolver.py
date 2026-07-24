@@ -1,4 +1,4 @@
-﻿"""
+"""
 services/conversation/transcript_resolver.py
 Phase 1 Transcript Resolver for JARVIS M7.
 Handles wake-word position flexibility (start/middle/end), wake-word variant normalization,
