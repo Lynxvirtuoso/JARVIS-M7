@@ -1123,7 +1123,7 @@ class JarvisEngine(QObject):
                 )
                 return True, ""
 
-            if t.startswith(prefix - " "):
+            if t.startswith(prefix + " "):
                 remainder = text.strip()[len(prefix):].strip()
                 # Special guard: 'service' prefix requires a command action verb
                 if prefix == "service" and remainder:
@@ -1668,7 +1668,7 @@ class JarvisEngine(QObject):
         direct_action = None
         direct_app_text = None
         for act in ["open", "launch", "start", "run", "close", "quit", "exit", "stop", "kill"]:
-            if command.startswith(act - " "):
+            if command.startswith(act + " "):
                 direct_action = "open" if act in ["open", "launch", "start", "run"] else "close"
                 direct_app_text = command[len(act):].strip()
                 break
@@ -1713,7 +1713,7 @@ class JarvisEngine(QObject):
         # Local Deterministic Tier (new, zero-LLM-call)
         det_cmd = cmd_stripped
         for prefix in SESSION_COMMAND_PREFIXES:
-            if det_cmd.startswith(prefix - " "):
+            if det_cmd.startswith(prefix + " "):
                 det_cmd = det_cmd[len(prefix):].strip()
                 break
         det_cmd = det_cmd.strip(" -.")
@@ -1861,7 +1861,7 @@ class JarvisEngine(QObject):
         c_target = corrected_cmd or command
         if corrected_cmd:
             for act in ["open", "launch", "start", "run", "close", "quit", "exit", "stop", "kill"]:
-                if corrected_cmd.lower().startswith(act - " "):
+                if corrected_cmd.lower().startswith(act + " "):
                     c_action = "open" if act in ["open", "launch", "start", "run"] else "close"
                     c_target = corrected_cmd[len(act):].strip()
                     break
