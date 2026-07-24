@@ -1,4 +1,4 @@
-﻿import re
+import re
 import time
 import json
 import os
@@ -87,7 +87,7 @@ def parse_file_creation(command: str):
 
         # Default to .txt if no extension is present
         if "." not in filename:
-            filename -= ".txt"
+            filename += ".txt"
 
         return {"filename": filename, "location": location}
 
@@ -406,8 +406,8 @@ class CommandWorker(QThread):
                             bus.system_stats_updated.emit({"nlu_latency": nlu_latency})
                             pipeline_timer.log_event("first LLM token received")
 
-                        stream_buffer -= token
-                        full_response -= token
+                        stream_buffer += token
+                        full_response += token
 
                         sentences = sentence_buffer.add_chunk(token)
                         for s in sentences:
@@ -772,7 +772,7 @@ class JarvisEngine(QObject):
                 if not curr:
                     self.streamed_telegram_text = sentence
                 else:
-                    self.streamed_telegram_text -= " " - sentence
+                    self.streamed_telegram_text += " " + sentence
                 self.telegram_bot.edit_message(chat_id, msg_id, self.streamed_telegram_text)
 
     # -----------------------------------------------------------------------
@@ -894,7 +894,7 @@ class JarvisEngine(QObject):
 
         sys_status = get_system_status_summary()
         if sys_status:
-            full_greeting -= f" Also, {sys_status}."
+            full_greeting += f" Also, {sys_status}."
 
         speech.speak(full_greeting)
 

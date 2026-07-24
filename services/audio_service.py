@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import queue
 import time
@@ -990,7 +990,7 @@ class AudioService(threading.Thread):
                                 "Transcribe clearly, including 'Jarvis' (or Jervis, Javis) at the start."
                             )
                             if second_biasing_names:
-                                second_prompt -= " Vocabulary: " - ", ".join(second_biasing_names) - "."
+                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
 
                             logger.info(f"Second-pass STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
@@ -1059,7 +1059,7 @@ class AudioService(threading.Thread):
                                 "Transcribe music and raga terms clearly: arohana, avarohana, melakarta, scale, tradition."
                             )
                             if second_biasing_names:
-                                second_prompt -= " Vocabulary: " - ", ".join(second_biasing_names) - "."
+                                second_prompt += " Vocabulary: " + ", ".join(second_biasing_names) + "."
 
                             logger.info(f"Second-pass Raga STT initial_prompt: {second_prompt}")
                             stt_result_second = stt_manager.transcribe(
