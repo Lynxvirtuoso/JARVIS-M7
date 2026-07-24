@@ -224,50 +224,41 @@ class SpeechEngine(threading.Thread):
                 if text is None:
                     break
                 if not text:
-                    continue
-
-                req_id = getattr(ctx, "request_id", None)
-
-                # Check 1: Discard if request is stale before starting synthesis
-                if req_id and not streaming_tts_queue.is_request_active(req_id):
-                    logger.info(f"[PIPELINE] Discarding stale text chunk before synthesis: '{text[:30]}...' for req {req_id[:8]}")
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            st = self._lifecycles[req_id]
-                            st.queued_text_count = max(0, st.queued_text_count - 1)
                     self.queue.task_done()
                     continue
 
-                if req_id:
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            st = self._lifecycles[req_id]
-                            st.queued_text_count = max(0, st.queued_text_count - 1)
-                            st.synthesis_active += 1
+                req_id = getattr(ctx, "request_id", None)
+                synthesis_started = False
 
-                # Check 2: Discard if interrupted/stale right before TTS call
-                if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
+                try:
+                    # Check 1: Discard if request is stale before starting synthesis
+                    if req_id and not streaming_tts_queue.is_request_active(req_id):
+                        logger.info(f"[PIPELINE] Discarding stale text chunk before synthesis: '{text[:30]}...' for req {req_id[:8]}")
+                        with self._lifecycle_lock:
+                            if req_id in self._lifecycles:
+                                st = self._lifecycles[req_id]
+                                st.queued_text_count = max(0, st.queued_text_count - 1)
+                        continue
+
                     if req_id:
                         with self._lifecycle_lock:
                             if req_id in self._lifecycles:
                                 st = self._lifecycles[req_id]
-                                st.synthesis_active = max(0, st.synthesis_active - 1)
-                    self.queue.task_done()
-                    continue
+                                st.queued_text_count = max(0, st.queued_text_count - 1)
+                                st.synthesis_active += 1
+                        synthesis_started = True
 
-                try:
+                    # Check 2: Discard if interrupted/stale right before TTS call
+                    if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
+                        logger.info(f"[PIPELINE] Skipping TTS call for interrupted/stale request {req_id[:8] if req_id else 'None'}")
+                        continue
+
                     logger.info(f"[PIPELINE] Synthesizing chunk in background: {text[:30]}...")
                     result = tts_manager.synthesize(text)
 
                     # Check 3: Discard post-synthesis if request was cancelled while generating
                     if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
                         logger.info(f"[PIPELINE] Discarding synthesized chunk (stale/interrupted post-synthesis): {text[:30]}...")
-                        if req_id:
-                            with self._lifecycle_lock:
-                                if req_id in self._lifecycles:
-                                    st = self._lifecycles[req_id]
-                                    st.synthesis_active = max(0, st.synthesis_active - 1)
-                        self.queue.task_done()
                         continue
 
                     with self._lifecycle_lock:
@@ -281,13 +272,14 @@ class SpeechEngine(threading.Thread):
                             self._lifecycles[req_id].queued_audio_count += 1
                     self.audio_queue.put((text, e, ctx))
                 finally:
-                    if req_id:
+                    if synthesis_started and req_id:
                         with self._lifecycle_lock:
                             if req_id in self._lifecycles:
                                 st = self._lifecycles[req_id]
                                 st.synthesis_active = max(0, st.synthesis_active - 1)
-
-                self.queue.task_done()
+                    self.queue.task_done()
+                    if req_id:
+                        self._check_and_emit_speech_ended(req_id)
             except queue.Empty:
                 pass
             except Exception as e:
@@ -322,71 +314,59 @@ class SpeechEngine(threading.Thread):
                     break
 
                 req_id = getattr(ctx, "request_id", None)
-                if req_id:
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            st = self._lifecycles[req_id]
-                            st.queued_audio_count = max(0, st.queued_audio_count - 1)
-
-                # Check 4: Discard audio before hardware playback if request is stale/cancelled
-                if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
-                    logger.info(f"[PIPELINE] Skipping playback for stale request {req_id[:8] if req_id else 'None'}")
-                    self.audio_queue.task_done()
+                try:
                     if req_id:
-                        self._check_and_emit_speech_ended(req_id)
-                    continue
+                        with self._lifecycle_lock:
+                            if req_id in self._lifecycles:
+                                st = self._lifecycles[req_id]
+                                st.queued_audio_count = max(0, st.queued_audio_count - 1)
 
-                if isinstance(result, Exception):
-                    logger.error(f"Skipping playback due to pre-synthesis error: {result}")
-                    self.audio_queue.task_done()
+                    # Check 4: Discard audio before hardware playback if request is stale/cancelled
+                    if tts_manager.interrupt_flag.is_set() or (req_id and not streaming_tts_queue.is_request_active(req_id)):
+                        logger.info(f"[PIPELINE] Skipping playback for stale request {req_id[:8] if req_id else 'None'}")
+                        continue
+
+                    if isinstance(result, Exception):
+                        logger.error(f"Skipping playback due to pre-synthesis error: {result}")
+                        continue
+
+                    self.is_speaking = True
                     if req_id:
+                        with self._lifecycle_lock:
+                            if req_id in self._lifecycles:
+                                self._lifecycles[req_id].provider_playing = True
+
+                    self.current_spoken_sentence = text
+                    self.recent_spoken_sentences.append(text)
+                    if len(self.recent_spoken_sentences) > 5:
+                        self.recent_spoken_sentences.pop(0)
+
+                    bus.speech_started.emit(text)
+
+                    from core.telemetry import pipeline_timer
+                    if ctx is not None:
+                        pipeline_timer.active_playing_context = ctx
+                    pipeline_timer.log_event(f"TTS playing pre-synthesized chunk: {text[:30]}...")
+
+                    # Play the pre-synthesized audio chunk
+                    tts_manager.play_result(result)
+                finally:
+                    self.is_speaking = False
+                    if req_id:
+                        with self._lifecycle_lock:
+                            if req_id in self._lifecycles:
+                                self._lifecycles[req_id].provider_playing = False
+                    self.current_spoken_sentence = ""
+                    self.speech_end_time = time.time()
+                    self.audio_queue.task_done()
+
+                    # Post-playback check: only emit speech_ended if request remains active
+                    if req_id and streaming_tts_queue.is_request_active(req_id):
                         self._check_and_emit_speech_ended(req_id)
-                    continue
-
-                self.is_speaking = True
-                if req_id:
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            self._lifecycles[req_id].provider_playing = True
-
-                self.current_spoken_sentence = text
-                self.recent_spoken_sentences.append(text)
-                if len(self.recent_spoken_sentences) > 5:
-                    self.recent_spoken_sentences.pop(0)
-
-                bus.speech_started.emit(text)
-
-                from core.telemetry import pipeline_timer
-                if ctx is not None:
-                    pipeline_timer.active_playing_context = ctx
-                pipeline_timer.log_event(f"TTS playing pre-synthesized chunk: {text[:30]}...")
-
-                # Play the pre-synthesized audio chunk
-                tts_manager.play_result(result)
-
-                self.is_speaking = False
-                if req_id:
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            self._lifecycles[req_id].provider_playing = False
-
-                self.current_spoken_sentence = ""
-                self.speech_end_time = time.time()
-                self.audio_queue.task_done()
-
-                # Post-playback check: only emit speech_ended if request remains active
-                if req_id and streaming_tts_queue.is_request_active(req_id):
-                    self._check_and_emit_speech_ended(req_id)
             except queue.Empty:
                 pass
             except Exception as e:
                 logger.error(f"Error in speech playback loop: {e}", exc_info=True)
-                self.is_speaking = False
-                if req_id:
-                    with self._lifecycle_lock:
-                        if req_id in self._lifecycles:
-                            self._lifecycles[req_id].provider_playing = False
-                self.speech_end_time = time.time()
 
 
 # Global speech service manager
