@@ -150,8 +150,8 @@ class TTSProviderManager:
                         self.health_cache[provider_id] = {"healthy": False, "status": "Error"}
 
         logger.error("All TTS providers failed.")
-        # Absolute last resort — print to console
-        print(f"JARVIS: {text}")
+        # Absolute last resort fallback output
+        logger.info(f"JARVIS (Fallback): {text}")
 
     def synthesize(
         self,

@@ -56,6 +56,11 @@ class SpeechEngine(threading.Thread):
     def begin_request(self, request_id: str) -> None:
         with self._lifecycle_lock:
             self.active_request_id = request_id
+            # Prune old lifecycle entries to prevent unbounded memory retention
+            if len(self._lifecycles) > 50:
+                stale_keys = [k for k, v in self._lifecycles.items() if (v.speech_ended_emitted or v.cancelled) and k != request_id]
+                for k in stale_keys:
+                    del self._lifecycles[k]
             self._lifecycles[request_id] = SpeechLifecycleState(
                 request_id=request_id,
                 producer_finished=False,

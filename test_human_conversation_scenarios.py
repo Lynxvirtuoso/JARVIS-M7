@@ -753,5 +753,18 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertFalse(state_err.cancelled)
 
 
+    def test_lifecycle_dictionary_pruning(self):
+        """Lifecycle records for completed/cancelled requests are pruned when active map exceeds threshold."""
+        from services.speech_service import speech
+
+        for i in range(60):
+            req_id = f"prune-req-{i:03d}"
+            speech.begin_request(req_id)
+            speech.cancel_request(req_id)
+
+        # The size of _lifecycles should be bounded (<= 51) instead of growing to 60
+        self.assertLessEqual(len(speech.engine._lifecycles), 51)
+
+
 if __name__ == "__main__":
     unittest.main()
