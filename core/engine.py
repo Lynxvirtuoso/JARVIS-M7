@@ -610,7 +610,7 @@ class JarvisEngine(QObject):
         if self.in_session:
             has_prefix, _ = self.strip_session_prefix(cmd)
             if not has_prefix:
-                cmd = "jarvis " - cmd
+                cmd = "jarvis " + cmd
                 logger.info(f"Typed command normalized: {cmd}")
 
         # Initialize pipeline timer for telemetry logging

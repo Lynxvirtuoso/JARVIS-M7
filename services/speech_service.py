@@ -110,6 +110,7 @@ class SpeechEngine(threading.Thread):
         streaming_tts_queue.cancel_request(request_id)
 
     def _check_and_emit_speech_ended(self, request_id: Optional[str] = None):
+        should_emit = False
         with self._lifecycle_lock:
             req_id = request_id or self.active_request_id
             if not req_id:
@@ -142,11 +143,16 @@ class SpeechEngine(threading.Thread):
 
             if is_idle:
                 state.speech_ended_emitted = True
-                logger.info(f"Speech playback fully completed for request {req_id[:8]}. Emitting speech_ended.")
-                try:
-                    bus.speech_ended.emit()
-                except Exception as e:
-                    logger.warning(f"Bus speech_ended emission skipped (bus object invalidated): {e}")
+                should_emit = True
+                emit_req_id = req_id
+
+        # Emit OUTSIDE the lock to prevent deadlocks from signal handlers
+        if should_emit:
+            logger.info(f"Speech playback fully completed for request {emit_req_id[:8]}. Emitting speech_ended.")
+            try:
+                bus.speech_ended.emit()
+            except Exception as e:
+                logger.warning(f"Bus speech_ended emission skipped (bus object invalidated): {e}")
 
     def speak(self, text, request_id: str | None = None, standalone: bool = True, begin_request: bool | None = None) -> str:
         from services.tts.sanitizer import sanitize_for_tts
