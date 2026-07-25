@@ -71,4 +71,63 @@ class PipelineTimer:
         else:
             logger.warning("=== PIPELINE TELEMETRY SUMMARY FOR: None ===")
 
+    def timed_stage(self, request_id: str, step_id: str, agent_role: str, stage_name: str):
+        """Context manager timing a specific stage execution within an agent."""
+        class StageContextManager:
+            def __init__(self, timer, req_id, stp_id, role, stage):
+                self.timer = timer
+                self.req_id = req_id
+                self.stp_id = stp_id
+                self.role = role
+                self.stage = stage
+                self.start_t = 0.0
+
+            def __enter__(self):
+                self.start_t = time.time()
+                self.timer.log_stage_event(self.req_id, self.stp_id, self.role, f"{self.stage}_start", 0.0)
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                dur_ms = (time.time() - self.start_t) * 1000.0
+                self.timer.log_stage_event(self.req_id, self.stp_id, self.role, self.stage, dur_ms)
+
+        return StageContextManager(self, request_id, step_id, agent_role, stage_name)
+
+    def log_stage_event(self, request_id: str, step_id: str, agent_role: str, stage_name: str, duration_ms: float = 0.0):
+        """Logs structured per-stage telemetry event with epoch timestamp for marker interval calculation."""
+        ts = time.time()
+        event_str = f"agent_stage:{request_id}:{step_id}:{agent_role}:{stage_name}:{duration_ms:.2f}ms:ts={ts:.6f}"
+        self.log_event(event_str)
+
+    def log_prompt_token_audit(
+        self,
+        request_id: str,
+        step_id: str,
+        agent_role: str,
+        sys_inst: str = "",
+        conv_hist: str = "",
+        shared_ctx: str = "",
+        memory_str: str = "",
+        exec_meta: str = "",
+        user_req: str = ""
+    ):
+        """Logs detailed per-agent prompt token breakdown audit (rough ~4 char per token metric)."""
+        def estimate_tokens(s: str) -> int:
+            return len(s) // 4 if s else 0
+
+        c_sys = estimate_tokens(sys_inst)
+        c_hist = estimate_tokens(conv_hist)
+        c_ctx = estimate_tokens(shared_ctx)
+        c_mem = estimate_tokens(memory_str)
+        c_meta = estimate_tokens(exec_meta)
+        c_req = estimate_tokens(user_req)
+        c_total = c_sys + c_hist + c_ctx + c_mem + c_meta + c_req
+
+        audit_str = (
+            f"token_audit:{request_id}:{step_id}:{agent_role} | "
+            f"sys={c_sys} hist={c_hist} ctx={c_ctx} mem={c_mem} meta={c_meta} req={c_req} | total={c_total}"
+        )
+        self.log_event(audit_str)
+
+
 pipeline_timer = PipelineTimer.get_instance()

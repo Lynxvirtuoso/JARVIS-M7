@@ -26,6 +26,7 @@ class BrainRequest:
     local_only: bool = False
     cloud_allowed: bool = True
     needs_current_information: bool = False
+    is_private: bool = False
 
 
 def get_provider_order(selected: str) -> list[str]:
@@ -118,16 +119,21 @@ class BrainProviderManager:
         from core.brain import needs_web_search
         web_needed = req.needs_current_information or needs_web_search(req.text)
 
+        # Consult BrainRouter for starting provider tier chain (CPU-only, synchronous)
+        from services.brain.router import brain_router
+        routing_decision = brain_router.route(req.text, is_private=getattr(req, "is_private", False))
+        provider_order = routing_decision.provider_chain or ["groq", "gemini", "ollama"]
+
         # Coding / reasoning indicators (word boundaries and traceback/explain detection)
         coding_keywords = ["code", "script", "python", "function", "debug", "algorithm", "refactor", "program", "traceback", "stack trace", "error log"]
         is_complex = any(re.search(rf"\b{re.escape(kw)}\b", text_lower) for kw in coding_keywords) or text_lower.startswith("explain this python") or len(req.text.split()) > 25
 
         if web_needed:
-            return BrainRoute.CURRENT_INFORMATION, ["groq", "gemini", "ollama"], True
+            return BrainRoute.CURRENT_INFORMATION, provider_order, True
         elif is_complex:
-            return BrainRoute.COMPLEX_REASONING, ["groq", "gemini", "ollama"], False
+            return BrainRoute.COMPLEX_REASONING, provider_order, False
         else:
-            return BrainRoute.SIMPLE_CHAT, ["ollama", "groq", "gemini"], False
+            return BrainRoute.SIMPLE_CHAT, provider_order, False
 
     def think(self, request: BrainRequest | str, history: list[dict] = None) -> BrainResult:
         if isinstance(request, str):
@@ -171,6 +177,8 @@ class BrainProviderManager:
                     res = provider.think(req.text, history)
                 if is_valid_result(res):
                     latency_ms = int((time.monotonic() - start_time) * 1000)
+                    from services.brain.router import brain_router
+                    brain_router.record_outcome("brain_req", provider_id, latency_ms, True)
                     logger.info(
                         f"Brain route: {route.value.upper()} | Selected provider: {provider_id} | "
                         f"Model: {getattr(provider, 'model', 'default')} | Thinking: disabled | "
@@ -181,8 +189,12 @@ class BrainProviderManager:
                 else:
                     err_msg = getattr(res, "error", "Invalid or empty response")
                     err_type = getattr(res, "error_type", "invalid_response")
+                    from services.brain.router import brain_router
+                    brain_router.record_outcome("brain_req", provider_id, 0.0, False)
                     logger.warning(f"Provider skipped: {provider_id} | Reason: {err_type} ({err_msg})")
             except Exception as e:
+                from services.brain.router import brain_router
+                brain_router.record_outcome("brain_req", provider_id, 0.0, False)
                 logger.error(f"Brain provider {provider_id!r} failed: {e}")
                 last_error = e
 
@@ -201,7 +213,13 @@ class BrainProviderManager:
         else:
             req = request
 
+        import time as _time
+        _t0 = _time.monotonic()
         route, provider_order, web_needed = self.determine_route(req)
+        logger.info(
+            f"[TELEMETRY_LATENCY] think_stream route determined: {route.value.upper()} | "
+            f"Provider order: {provider_order} | Web search: {web_needed} | Setup elapsed: {(_time.monotonic() - _t0)*1000:.1f}ms"
+        )
 
         if web_needed and "groq" in provider_order:
             groq_provider = self.providers.get("groq")
@@ -216,6 +234,9 @@ class BrainProviderManager:
             provider = self.providers.get(provider_id)
             if provider is None:
                 continue
+
+            _p_t0 = _time.monotonic()
+            logger.info(f"[TELEMETRY_LATENCY] Attempting provider '{provider_id}' for think_stream...")
 
             try:
                 if hasattr(provider, "think_stream"):

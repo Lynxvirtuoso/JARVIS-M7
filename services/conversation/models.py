@@ -20,6 +20,25 @@ class SensitiveActionType(Enum):
     AMBIGUOUS_SHUTDOWN = "ambiguous_shutdown"
 
 
+class ConversationState(Enum):
+    IDLE = "IDLE"
+    LISTENING = "LISTENING"
+    THINKING = "THINKING"
+    SPEAKING = "SPEAKING"
+    WAITING_FOR_FOLLOW_UP = "WAITING_FOR_FOLLOW_UP"
+    WAITING_FOR_CONFIRMATION = "WAITING_FOR_CONFIRMATION"
+    INTERRUPTED = "INTERRUPTED"
+    CLOSING = "CLOSING"
+
+
+@dataclass
+class SessionHandle:
+    session_id: str
+    created_at: float
+    trigger_source: str
+    active_request_id: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class ConversationRequest:
     request_id: str

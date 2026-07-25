@@ -765,6 +765,60 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         # The size of _lifecycles should be bounded (<= 51) instead of growing to 60
         self.assertLessEqual(len(speech.engine._lifecycles), 51)
 
+    def test_shutting_down_state_is_non_interruptible(self):
+        """Simulate speech_interrupted firing during SHUTTING_DOWN. State must remain SHUTTING_DOWN and exit signal emits."""
+        from core.engine import JarvisEngine
+        from unittest.mock import Mock, patch
+
+        engine = JarvisEngine()
+        engine.transition_to("SHUTTING_DOWN")
+        self.assertEqual(engine.state, "SHUTTING_DOWN")
+
+        # Fire speech_interrupted signal
+        engine.on_speech_interrupted()
+        self.assertEqual(engine.state, "SHUTTING_DOWN")
+
+        # Farewell speech completes -> full_exit_requested emits
+        mock_emit = Mock()
+        with patch("core.engine.bus", full_exit_requested=Mock(emit=mock_emit)):
+            engine.on_speech_ended()
+            mock_emit.assert_called_once()
+
+    def test_conversational_state_interrupt_resets_to_listening(self):
+        """Simulate speech_interrupted firing during conversational state (SPEAKING_RESPONSE). Must reset state to SESSION_LISTENING."""
+        from core.engine import JarvisEngine
+
+        engine = JarvisEngine()
+        engine.in_session = True
+        engine.pending_command = "test command"
+        engine.transition_to("SPEAKING_RESPONSE")
+
+        # Fire speech_interrupted signal
+        engine.on_speech_interrupted()
+        self.assertIsNone(engine.pending_command)
+        self.assertEqual(engine.state, "SESSION_LISTENING")
+
+    def test_conversational_question_bypasses_low_confidence_clarification(self):
+        """Clear conversational questions with low STT confidence must not trigger needs_clarification."""
+        from services.conversation.transcript_resolver import transcript_resolver
+
+        questions = [
+            "can you explain about football?",
+            "what is the capital of France",
+            "tell me about black holes"
+        ]
+        for q in questions:
+            res = transcript_resolver.resolve(q, stt_confidence=0.27, audio_quality=1.0)
+            self.assertFalse(res.needs_clarification, f"Failed for query: {q}")
+
+    def test_garbled_low_confidence_input_triggers_clarification(self):
+        """Genuinely garbled non-conversational inputs with low confidence must still trigger needs_clarification."""
+        from services.conversation.transcript_resolver import transcript_resolver
+
+        garbled = "xyz123 blarg flimflam"
+        res = transcript_resolver.resolve(garbled, stt_confidence=0.27, audio_quality=1.0)
+        self.assertTrue(res.needs_clarification)
+
 
 if __name__ == "__main__":
     unittest.main()

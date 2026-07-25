@@ -14,6 +14,7 @@ from skills.manager import skill_manager
 from core.trust_gate import TrustGate, ToolCall
 from core.brain import brain
 from services.acknowledgement_service import acknowledgement_service
+from services.memory.memory_service import memory_service
 
 def collapse_repeated_command(text: str) -> tuple[str, int]:
     original = text or ""
@@ -216,38 +217,9 @@ def get_system_status_summary() -> str:
     return None
 
 # ---------------------------------------------------------------------------
-# Session prefix variants â€” any transcription starting with one of these
-# (after lowercasing) is accepted as a valid in-session command.
-#
-# Covers common Indian-English STT mishearings of "Jarvis":
-#   javish / jarvish / jollis / jar wish / jarviz / jar fis / jar face
+# Session prefix gate — delegates wake-word prefix detection to TranscriptResolver
 # ---------------------------------------------------------------------------
-SESSION_COMMAND_PREFIXES = [
-    "jarvis",
-    "jervis",
-    "javis",
-    "charvis",
-    "service",
-    "jar miss",
-    "jar vice",
-    "jarves",
-    "jarvas",
-    # Extended accent / STT error variants
-    "javish",
-    "jollis",
-    "jar wish",
-    "jarvish",
-    "jarviz",
-    "jar fis",
-    "jar face",
-    "jarfish",
-    "jar vis",
-    "jarvi",
-]
-
-# Fuzzy ratio threshold for prefix matching (0.0â€“1.0).
-# Applied to the FIRST word(s) of a transcription when no exact match is found.
-SESSION_PREFIX_FUZZY_THRESHOLD = 0.75
+FUZZY_THRESHOLD = 0.75
 
 # ---------------------------------------------------------------------------
 # Known desktop assistant commands and accent/mishear variants
@@ -397,8 +369,11 @@ class CommandWorker(QThread):
                 try:
                     from services.tts.provider_manager import tts_manager
                     for token in response:
-                        if tts_manager.interrupt_flag.is_set() or not streaming_tts_queue.is_request_active(stream_req_id):
-                            logger.info("CommandWorker streaming loop aborted due to TTS interrupt or request cancellation.")
+                        if tts_manager.interrupt_flag.is_set():
+                            logger.info(f"CommandWorker streaming loop aborted: TTS interrupt_flag set for req {stream_req_id[:8] if stream_req_id else 'None'}.")
+                            break
+                        if not streaming_tts_queue.is_request_active(stream_req_id):
+                            logger.info(f"CommandWorker streaming loop aborted: active request ID mismatch (stream_req_id={stream_req_id[:8] if stream_req_id else 'None'}, active={streaming_tts_queue.active_request_id[:8] if streaming_tts_queue.active_request_id else 'None'}).")
                             break
                         if not first_token_received:
                             first_token_received = True
@@ -452,8 +427,8 @@ class CommandWorker(QThread):
                     _speech_svc.mark_producer_finished(stream_req_id)
 
                 # Save history to SQLite
-                db.add_history("user", self.command)
-                db.add_history("model", full_response)
+                memory_service.add_history("user", self.command)
+                memory_service.add_history("model", full_response)
 
                 bus.command_completed.emit(True, full_response)
                 self.response_ready.emit(full_response)
@@ -530,10 +505,10 @@ class JarvisEngine(QObject):
         self.misheard_command = None
         self.worker = None
 
-        # Session state tracking
+        # Session state tracking via SessionMemoryStore
         self.in_session = False
         self.consecutive_invalid = 0
-        self.current_space = None
+        memory_service.set_session_val("current_space", None)
         self.pending_raga_candidates = None
         self.pending_command_aspect = None
 
@@ -583,8 +558,27 @@ class JarvisEngine(QObject):
         bus.stream_token_received.connect(self.on_stream_token_received)
         self.telegram_bot.start()
 
+    @property
+    def current_space(self) -> Optional[str]:
+        return memory_service.get_session_val("current_space", None)
+
+    @current_space.setter
+    def current_space(self, value: Optional[str]) -> None:
+        memory_service.set_session_val("current_space", value)
+
     @pyqtSlot()
     def on_speech_interrupted(self):
+        # Committed states: the action already executed / is in-flight. An interrupt here
+        # must not unwind it — only conversational/pre-confirmation states should reset.
+        NON_INTERRUPTIBLE_STATES = {"SHUTTING_DOWN"}
+
+        if self.state in NON_INTERRUPTIBLE_STATES:
+            logger.info(
+                f"speech_interrupted ignored: state={self.state} is non-interruptible "
+                f"(action already committed)."
+            )
+            return
+
         logger.info("Engine received speech_interrupted signal. Resetting confirmation states and returning to session/passive.")
         self.pending_command = None
         self.pending_command_type = None
@@ -608,7 +602,7 @@ class JarvisEngine(QObject):
 
         # If in session and does not start with one of the prefixes, prepend "jarvis "
         if self.in_session:
-            has_prefix, _ = self.strip_session_prefix(cmd)
+            has_prefix, _ = self._check_session_command_prefix(cmd)
             if not has_prefix:
                 cmd = "jarvis " + cmd
                 logger.info(f"Typed command normalized: {cmd}")
@@ -630,7 +624,7 @@ class JarvisEngine(QObject):
         self.telegram_bot.send_typing_indicator(chat_id)
 
         cmd = text.strip()
-        has_prefix, stripped = self.strip_session_prefix(cmd)
+        has_prefix, stripped = self._check_session_command_prefix(cmd)
         if has_prefix:
             cmd = stripped
 
@@ -798,13 +792,13 @@ class JarvisEngine(QObject):
                 parts = confirm_cmd.split(":")
                 number = parts[1]
                 name = parts[2] if len(parts) > 2 else "Unknown"
-                msg_text = f"Do you want me to call {name} at {number}, Sir-"
+                msg_text = f"Do you want me to call {name} at {number}, Sir?"
             elif confirm_type == "near_miss_call_resolution" and confirm_cmd.startswith("place_call_confirmed:"):
                 parts = confirm_cmd.split(":")
                 name = parts[2] if len(parts) > 2 else "Unknown"
-                msg_text = f"Did you mean to call {name}, Sir-"
+                msg_text = f"Did you mean to call {name}, Sir?"
             else:
-                msg_text = f"Did you mean: {confirm_cmd}-"
+                msg_text = f"Did you mean: {confirm_cmd}?"
 
             msg_id = self.telegram_bot.send_confirmation_keyboard(
                 self.last_telegram_chat_id,
@@ -896,6 +890,8 @@ class JarvisEngine(QObject):
         if sys_status:
             full_greeting += f" Also, {sys_status}."
 
+        from core.telemetry import pipeline_timer
+        pipeline_timer.start_pipeline("startup_greeting")
         speech.speak(full_greeting)
 
     # -----------------------------------------------------------------------
@@ -913,6 +909,9 @@ class JarvisEngine(QObject):
         self.wake_locked = True
         logger.info(f"Wake accepted: source={source}")
 
+        from services.conversation.conversation_manager import conversation_manager
+        conversation_manager.begin_session(trigger_source=source)
+
         # Tell HUD to show itself (in case it was hidden while in passive)
         bus.show_hud_requested.emit()
 
@@ -920,6 +919,8 @@ class JarvisEngine(QObject):
         self.transition_to("SPEAKING_ACKNOWLEDGEMENT")
 
         salutation = config.salutation
+        from core.telemetry import pipeline_timer
+        pipeline_timer.start_pipeline("wake_acknowledgement")
         speech.speak(f"Yes, {salutation}.")
         # Session is activated inside on_speech_ended() after acknowledgement TTS finishes.
 
@@ -1088,90 +1089,19 @@ class JarvisEngine(QObject):
     # -----------------------------------------------------------------------
     # Session prefix gate
     # -----------------------------------------------------------------------
-    @staticmethod
-    def strip_session_prefix(text: str):
+    def _check_session_command_prefix(self, text: str) -> Tuple[bool, str]:
         """
-        Check if text starts with a known session prefix (exact then fuzzy).
-
-        Strategy:
-          1. Exact / startswith match against SESSION_COMMAND_PREFIXES.
-          2. Fuzzy ratio match of the leading token(s) against each prefix
-             (threshold = SESSION_PREFIX_FUZZY_THRESHOLD, default 0.75).
-             Only fuzzy-matches the word count covered by each prefix.
-
-        Special rule for the 'service' prefix:
-          Because 'service' is also a common English word, it is only accepted
-          when the payload after it begins with a recognised command action verb.
-          'service is bad today' is silently rejected as non-prefixed speech.
-
+        Check if text starts with or contains a wake word or phonetic variant, delegating to TranscriptResolver.
         Returns (has_prefix: bool, text_without_prefix: str).
         """
-        # Action verbs that must appear at the start of a payload for 'service' to qualify
-        SERVICE_ACTION_VERBS = {
-            "open", "close", "start", "launch", "stop", "hide", "show",
-            "increase", "decrease", "mute", "unmute", "take", "play",
-            "pause", "exit", "shutdown", "sleep", "standby", "lock",
-            "search", "tell", "what", "which", "how", "when", "who",
-        }
-
-        t = text.lower().strip()
-        # ---- Pass 1: Exact match ----
-        for prefix in SESSION_COMMAND_PREFIXES:
-            if t == prefix:
-                logger.info(
-                    f"Session prefix matched: raw='{prefix}', canonical='jarvis', method='exact'"
-                )
-                return True, ""
-
-            if t.startswith(prefix + " "):
-                remainder = text.strip()[len(prefix):].strip()
-                # Special guard: 'service' prefix requires a command action verb
-                if prefix == "service" and remainder:
-                    rem_words = remainder.lower().split()
-                    first_rem_word = re.sub(r"[.,!-;:'\"]-", "", rem_words[0]) if rem_words else ""
-                    if first_rem_word not in SERVICE_ACTION_VERBS:
-                        logger.info(
-                            f"Session input ignored: 'service' prefix present but payload "
-                            f"'{remainder}' does not start with a command verb"
-                        )
-                        return False, text
-
-                logger.info(
-                    f"Session prefix matched: raw='{prefix}', canonical='jarvis', method='exact'"
-                )
-                return True, remainder
-
-        # ---- Pass 2: Fuzzy match of leading token(s) ----
-        words_original = text.strip().split()
-        words_clean = [re.sub(r"[.,!-;:'\"]-", "", w).lower() for w in words_original]
-
-        for prefix in SESSION_COMMAND_PREFIXES:
-            prefix_words = prefix.split()
-            n = len(prefix_words)
-            if len(words_clean) < n:
-                continue
-
-            candidate_clean = " ".join(words_clean[:n])
-            ratio = SequenceMatcher(None, candidate_clean, prefix).ratio()
-            if ratio >= SESSION_PREFIX_FUZZY_THRESHOLD:
-                remainder = " ".join(words_original[n:]).strip()
-
-                if prefix == "service" and remainder:
-                    rem_words = remainder.lower().split()
-                    first_rem_word = re.sub(r"[.,!-;:'\"]-", "", rem_words[0]) if rem_words else ""
-                    if first_rem_word not in SERVICE_ACTION_VERBS:
-                        logger.info(
-                            f"Session input ignored: 'service' fuzzy prefix, payload "
-                            f"'{remainder}' does not start with a command verb"
-                        )
-                        continue
-
-                logger.info(
-                    f"Session prefix matched: raw='{' '.join(words_original[:n])}', canonical='jarvis', "
-                    f"method='fuzzy', score={ratio:.2f}"
-                )
-                return True, remainder
-
+        from services.conversation.transcript_resolver import transcript_resolver
+        resolved_tr = transcript_resolver.resolve(text)
+        if resolved_tr.wake_word_detected:
+            logger.info(
+                f"Session prefix matched via TranscriptResolver: raw='{text}', "
+                f"resolved='{resolved_tr.resolved_text}', position='{resolved_tr.wake_word_position}'"
+            )
+            return True, resolved_tr.resolved_text
         return False, text
 
     # -----------------------------------------------------------------------
@@ -1337,7 +1267,7 @@ class JarvisEngine(QObject):
                     action_payload={"command": resolved_tr.resolved_text},
                     source=source,
                     created_at=time.time(),
-                    expires_at=time.time() - 30.0
+                    expires_at=time.time() + 30.0
                 )
                 self.transition_to("WAITING_FOR_CONFIRMATION")
                 speech.speak(resolved_tr.clarification_question or f"Did you ask me to {resolved_tr.resolved_text}-", request_id=request_id)
@@ -1361,13 +1291,13 @@ class JarvisEngine(QObject):
                     source=source,
                     options=[SensitiveActionType.EXIT_APPLICATION, SensitiveActionType.SHUTDOWN_COMPUTER],
                     created_at=time.time(),
-                    expires_at=time.time() - 30.0
+                    expires_at=time.time() + 30.0
                 )
                 self.pending_command = resolved_tr.resolved_text
                 self.pending_command_type = "sensitive_action"
                 self.pending_confirmation_obj = None
                 self.transition_to("WAITING_FOR_CONFIRMATION")
-                speech.speak("Did you mean close JARVIS, or shut down the computer-", request_id=request_id)
+                speech.speak("Did you mean close JARVIS, or shut down the computer?", request_id=request_id)
                 return
 
             self.pending_command = resolved_tr.resolved_text
@@ -1380,21 +1310,21 @@ class JarvisEngine(QObject):
                 action_payload={"command": resolved_tr.resolved_text},
                 source=source,
                 created_at=time.time(),
-                expires_at=time.time() - 30.0
+                expires_at=time.time() + 30.0
             )
             self.transition_to("WAITING_FOR_CONFIRMATION")
             if act_type == SensitiveActionType.EXIT_APPLICATION:
-                prompt = f"Do you want me to close JARVIS, {salutation}-"
+                prompt = f"Do you want me to close JARVIS, {salutation}?"
             elif act_type == SensitiveActionType.SHUTDOWN_COMPUTER:
-                prompt = f"Do you want me to shut down your PC, {salutation}-"
+                prompt = f"Do you want me to shut down your PC, {salutation}?"
             elif act_type == SensitiveActionType.RESTART_COMPUTER:
-                prompt = f"Do you want me to restart your PC, {salutation}-"
+                prompt = f"Do you want me to restart your PC, {salutation}?"
             elif act_type == SensitiveActionType.LOG_OUT_WINDOWS:
-                prompt = f"Do you want me to log out of your PC, {salutation}-"
+                prompt = f"Do you want me to log out of your PC, {salutation}?"
             elif act_type == SensitiveActionType.LOCK_COMPUTER:
-                prompt = f"Do you want me to lock your PC, {salutation}-"
+                prompt = f"Do you want me to lock your PC, {salutation}?"
             else:
-                prompt = f"Do you want me to {resolved_tr.resolved_text}, {salutation}-"
+                prompt = f"Do you want me to {resolved_tr.resolved_text}, {salutation}?"
             speech.speak(prompt, request_id=request_id)
             return
 
@@ -1435,7 +1365,7 @@ class JarvisEngine(QObject):
                 has_prefix = True
                 stripped = resolved_tr.resolved_text
             else:
-                has_prefix, stripped = self.strip_session_prefix(raw_command_str)
+                has_prefix, stripped = self._check_session_command_prefix(raw_command_str)
 
             if not has_prefix and self.awaiting_followup:
                 logger.info(f"Prefix-free follow-up accepted: '{raw_command}'")
@@ -1479,7 +1409,7 @@ class JarvisEngine(QObject):
                     self.pending_command_type = "lifecycle_sleep" if stripped_clean in SLEEP_TRIGGERS else "lifecycle_exit"
                     self.misheard_command = raw_command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
-                    speech.speak(f"Did you mean, {stripped_clean}, {salutation}-")
+                    speech.speak(f"Did you mean, {stripped_clean}, {salutation}?")
                     return
 
                 if stripped_clean in SLEEP_TRIGGERS:
@@ -1525,7 +1455,7 @@ class JarvisEngine(QObject):
                 self.pending_command_type = "autostart_toggle"
                 self.misheard_command = command
                 self.transition_to("WAITING_FOR_CONFIRMATION")
-                speech.speak(f"Did you mean to {'enable' if is_enable else 'disable'} autostart, {salutation}-")
+                speech.speak(f"Did you mean to {'enable' if is_enable else 'disable'} autostart, {salutation}?")
                 return
 
         # Check for create routine trigger
@@ -1536,7 +1466,7 @@ class JarvisEngine(QObject):
                 self.creation_routine_steps = []
                 logger.info(f"Starting creation of routine: '{routine_name}'")
                 self.transition_to("SPEAKING_RESPONSE")
-                speech.speak("What should I do first, Sir-")
+                speech.speak("What should I do first, Sir?")
                 self._schedule_return_to_session_after_speech()
                 return
 
@@ -1549,10 +1479,10 @@ class JarvisEngine(QObject):
                 fact = command[len("remember "):].strip()
 
             if fact:
-                facts = db.get_memory("user_facts", default=[])
+                facts = memory_service.get_fact("user_facts", default=[])
                 if fact not in facts:
                     facts.append(fact)
-                    db.set_memory("user_facts", facts)
+                    memory_service.set_fact("user_facts", facts)
                 logger.info(f"Saved fact to memory: '{fact}'")
                 self.transition_to("SPEAKING_RESPONSE")
                 speech.speak(f"Got it, {salutation}. I'll remember that.")
@@ -1561,7 +1491,7 @@ class JarvisEngine(QObject):
 
         # Memory: "what do you remember about me" or "what do you know about me"
         if cmd_stripped in ("what do you remember about me", "what do you know about me", "what do you know", "what do you remember"):
-            facts = db.get_memory("user_facts", default=[])
+            facts = memory_service.get_fact("user_facts", default=[])
             if not facts:
                 msg = f"I don't have anything saved in my memory yet, {salutation}."
             else:
@@ -1574,7 +1504,7 @@ class JarvisEngine(QObject):
 
         # Memory: "forget everything"
         if cmd_stripped == "forget everything":
-            db.set_memory("user_facts", [])
+            memory_service.set_fact("user_facts", [])
             logger.info("Cleared all facts from memory.")
             self.transition_to("SPEAKING_RESPONSE")
             speech.speak(f"I have cleared everything from my memory, {salutation}.")
@@ -1584,7 +1514,7 @@ class JarvisEngine(QObject):
         # Memory: "forget that [fact]"
         if cmd_stripped.startswith("forget that "):
             target_fact = command[len("forget that "):].strip().lower()
-            facts = db.get_memory("user_facts", default=[])
+            facts = memory_service.get_fact("user_facts", default=[])
 
             best_match = None
             best_score = 0.0
@@ -1597,7 +1527,7 @@ class JarvisEngine(QObject):
 
             if best_match and best_score >= 0.6:
                 facts.remove(best_match)
-                db.set_memory("user_facts", facts)
+                memory_service.set_fact("user_facts", facts)
                 logger.info(f"Removed fact from memory: '{best_match}' (similarity={best_score:.2f})")
                 msg = f"Understood, {salutation}. That's been forgotten."
             else:
@@ -1618,7 +1548,7 @@ class JarvisEngine(QObject):
                 self.pending_command_type = "lifecycle_exit" if cmd_stripped in APP_EXIT_TRIGGERS else "lifecycle_sleep"
                 self.misheard_command = command
                 self.transition_to("WAITING_FOR_CONFIRMATION")
-                speech.speak(f"Did you mean, {cmd_stripped}, {salutation}-")
+                speech.speak(f"Did you mean, {cmd_stripped}, {salutation}?")
                 return
 
             if cmd_stripped in APP_EXIT_TRIGGERS:
@@ -1631,7 +1561,7 @@ class JarvisEngine(QObject):
         # PART E â€” Incomplete deterministic app commands check
         INCOMPLETE_APP_COMMANDS = {"open", "close", "launch", "start", "run", "stop", "kill", "exit"}
         if cmd_stripped in INCOMPLETE_APP_COMMANDS:
-            self._speak_and_return_to_session("Which app should I close, Sir-")
+            self._speak_and_return_to_session("Which app should I close, Sir?")
             return
 
         # PART G â€” Protected Lifecycle Phrases Fuzzy Protection
@@ -1655,7 +1585,7 @@ class JarvisEngine(QObject):
 
         if is_lifecycle_phrase:
             logger.info(f"Protected lifecycle phrase detected/fuzzy-matched: '{cmd_stripped}'")
-            self._speak_and_return_to_session("Did you mean to sleep or exit the application, Sir-")
+            self._speak_and_return_to_session("Did you mean to sleep or exit the application, Sir?")
             return
 
         personal_corrections = get_personal_corrections()
@@ -1705,18 +1635,19 @@ class JarvisEngine(QObject):
                     self.pending_command_type = "app_launch"
                     self.misheard_command = command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
-                    speech.speak(f"Did you mean, {target_cmd}, {salutation}-")
+                    speech.speak(f"Did you mean, {target_cmd}, {salutation}?")
                     return
             else:
                 logger.info(f"Direct app resolving failed or confidence low, falling back to intent/fuzzy pipeline.")
 
         # Local Deterministic Tier (new, zero-LLM-call)
-        det_cmd = cmd_stripped
-        for prefix in SESSION_COMMAND_PREFIXES:
-            if det_cmd.startswith(prefix + " "):
-                det_cmd = det_cmd[len(prefix):].strip()
-                break
-        det_cmd = det_cmd.strip(" -.")
+        from services.conversation.transcript_resolver import transcript_resolver
+        det_tr = transcript_resolver.resolve(cmd_stripped)
+        raw_det = det_tr.resolved_text.lower().strip()
+        raw_det = re.sub(r"[.,!-;:'\"]+", "", raw_det).strip()
+        # Strip trailing filler words (now, please, currently, right now, today)
+        det_cmd = re.sub(r"\b(now|please|currently|right now|today)\b", "", raw_det).strip()
+        det_cmd = re.sub(r"\s+", " ", det_cmd).strip()
 
         if det_cmd in ("settings", "open settings", "open configuration", "configuration", "open settings panel"):
             logger.info("Local Deterministic Trigger: Open settings requested")
@@ -1724,7 +1655,7 @@ class JarvisEngine(QObject):
             self._speak_and_return_to_session(f"Opening Configuration Panel, {salutation}.")
             return
 
-        if det_cmd in ("what time is it", "whats the time", "what is the time", "tell me the time", "time"):
+        if det_cmd in ("what time is it", "whats the time", "what is the time", "tell me the time", "time", "the time"):
             import datetime
             now = datetime.datetime.now()
             time_str = now.strftime("%I:%M %p")
@@ -1732,7 +1663,7 @@ class JarvisEngine(QObject):
             self._speak_and_return_to_session(msg)
             return
 
-        if det_cmd in ("whats the date", "what is the date", "what day is it", "whats today", "what is today", "date"):
+        if det_cmd in ("whats the date", "what is the date", "what day is it", "whats today", "what is today", "date", "the date"):
             import datetime
             now = datetime.datetime.now()
             date_str = now.strftime("%A, %B %d, %Y")
@@ -1740,7 +1671,7 @@ class JarvisEngine(QObject):
             self._speak_and_return_to_session(msg)
             return
 
-        if det_cmd in ("system status", "check system status", "how is my pc", "how is my computer", "how is the system", "pc status", "computer status"):
+        if det_cmd in ("system status", "check system status", "how is my pc", "how is my computer", "how is the system", "pc status", "computer status", "status"):
             status = get_system_status_summary()
             if not status:
                 status = f"All systems are functioning within normal parameters, {salutation}."
@@ -1749,18 +1680,11 @@ class JarvisEngine(QObject):
             self._speak_and_return_to_session(status)
             return
 
-        # Question-like pattern heuristic to bypass fuzzy app-matching
-        wh_pattern = r"^(who|what|when|where|why|how)s-\b"
-        aux_pattern = r"^(is|are|was|were|did|does|do|can|could|will|would|have|has|had|should|must|may|might)\b"
-        info_pattern = r"^(search|find|tell\s-me|explain|google)\b"
-
-        is_question = (
-            bool(re.search(wh_pattern, cmd_stripped)) or
-            bool(re.search(aux_pattern, cmd_stripped)) or
-            bool(re.search(info_pattern, cmd_stripped))
-        )
-        action_verbs = ["open", "close", "launch", "start", "stop", "kill", "exit", "sleep"]
-        has_action = any(re.search(rf"\b{re.escape(verb)}\b", cmd_stripped) for verb in action_verbs)
+        # Question-like pattern heuristic via QuestionClassifier
+        from services.conversation.question_classifier import question_classifier
+        classification = question_classifier.classify(cmd_stripped)
+        is_question = classification.is_conversational
+        has_action = classification.routing_hints.get("has_action_verbs", False)
 
         calendar_keywords = ["calendar", "meeting", "appointment", "event", "free", "busy", "schedule"]
         is_calendar = any(kw in cmd_stripped for kw in calendar_keywords) or any(
@@ -1785,9 +1709,9 @@ class JarvisEngine(QObject):
             )
 
             if acknowledgment:
-                speech.speak(acknowledgment)
+                speech.speak(acknowledgment, request_id=request_id, standalone=False)
 
-            self._launch_worker(command, fallback_only=True)
+            self._launch_worker(command, fallback_only=True, request_id=request_id)
             return
 
         # File Creation Intent Matcher (intercepts before fuzzy app matcher)
@@ -1838,7 +1762,7 @@ class JarvisEngine(QObject):
                     self.pending_command_type = "file_creation"
                     self.misheard_command = command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
-                    speech.speak(f"Would you like me to create the file {filename} on your {location}, Sir-")
+                    speech.speak(f"Would you like me to create the file {filename} on your {location}, Sir?")
                     return
                 else:
                     self.transition_to("PASSIVE_WAKE_LISTENING")
@@ -1890,7 +1814,7 @@ class JarvisEngine(QObject):
                 self.pending_command_type = "app_launch"
                 self.misheard_command = command
                 self.transition_to("WAITING_FOR_CONFIRMATION")
-                speech.speak(f"Did you mean, {corrected_cmd}, {salutation}-")
+                speech.speak(f"Did you mean, {corrected_cmd}, {salutation}?")
                 return
 
         try:
@@ -1924,7 +1848,7 @@ class JarvisEngine(QObject):
                         self.pending_command_type = "app_launch"
                         self.misheard_command = command
                         self.transition_to("WAITING_FOR_CONFIRMATION")
-                        speech.speak(f"Did you mean, {target_cmd}, {salutation}-")
+                        speech.speak(f"Did you mean, {target_cmd}, {salutation}?")
                         return
             elif api_intent and api_intent.action == "place_call" and api_intent.confidence >= 0.75:
                 logger.info(f"Call intent resolved: {api_intent.action} {api_intent.target}")
@@ -1944,7 +1868,7 @@ class JarvisEngine(QObject):
                     self.misheard_command = command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
 
-                    confirm_phrase = f"Did you mean to call {name}, {salutation}-"
+                    confirm_phrase = f"Did you mean to call {name}, {salutation}?"
                     speech.speak(confirm_phrase)
                     return
                 elif res["status"] == "ambiguous":
@@ -1955,7 +1879,7 @@ class JarvisEngine(QObject):
 
                     candidates_list = [f"{i-1}. {c['name']}" for i, c in enumerate(res["candidates"])]
                     candidates_str = " ".join(candidates_list)
-                    speech.speak(f"I found these contacts matching '{api_intent.target}', {salutation}: {candidates_str}. Which one should I call-")
+                    speech.speak(f"I found these contacts matching '{api_intent.target}', {salutation}: {candidates_str}. Which one should I call?")
                     return
 
                 contact = res["contact"]
@@ -1986,7 +1910,7 @@ class JarvisEngine(QObject):
                     self.misheard_command = command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
 
-                    confirm_phrase = f"Do you want me to call {name} at {number}, {salutation}-"
+                    confirm_phrase = f"Do you want me to call {name} at {number}, {salutation}?"
                     speech.speak(confirm_phrase)
                     return
             elif api_intent and api_intent.action in ["create_event", "update_event", "delete_event", "list_events", "get_next_event", "check_availability"] and api_intent.confidence >= 0.75:
@@ -2014,25 +1938,25 @@ class JarvisEngine(QObject):
                     self.misheard_command = command
                     self.transition_to("WAITING_FOR_CONFIRMATION")
 
-                    confirm_phrase = f"Do you want to run that calendar action, {salutation}-"
+                    confirm_phrase = f"Do you want to run that calendar action, {salutation}?"
                     if api_intent.action == "create_event":
                         try:
                             params = json.loads(api_intent.target)
                             from services.calendar_service import format_datetime_human
                             readable_time = format_datetime_human(params.get("start_time"))
-                            confirm_phrase = f"Do you want me to schedule '{params.get('summary', 'event')}' for {readable_time}, {salutation}-"
+                            confirm_phrase = f"Do you want me to schedule '{params.get('summary', 'event')}' for {readable_time}, {salutation}?"
                         except Exception:
                             pass
                     elif api_intent.action == "delete_event":
                         try:
                             params = json.loads(api_intent.target)
-                            confirm_phrase = f"Are you sure you want to delete the meeting '{params.get('event_ref')}', {salutation}-"
+                            confirm_phrase = f"Are you sure you want to delete the meeting '{params.get('event_ref')}', {salutation}?"
                         except Exception:
                             pass
                     elif api_intent.action == "update_event":
                         try:
                             params = json.loads(api_intent.target)
-                            confirm_phrase = f"Do you want to update the meeting '{params.get('event_ref')}', {salutation}-"
+                            confirm_phrase = f"Do you want to update the meeting '{params.get('event_ref')}', {salutation}?"
                         except Exception:
                             pass
 
@@ -2057,7 +1981,7 @@ class JarvisEngine(QObject):
         pipeline_timer.log_event("intent parsed (fallback path)")
         logger.info(f"Routing fallback command to engine pipeline (checking skills first): {command!r}")
         self.transition_to("EXECUTING_COMMAND")
-        self._launch_worker(command, fallback_only=False)
+        self._launch_worker(command, fallback_only=False, request_id=request_id)
 
 
 
@@ -2199,7 +2123,7 @@ class JarvisEngine(QObject):
             "shut down the computer", "shutdown computer", "shut down pc",
             "turn off the computer", "turn off pc", "shut down windows",
             "shut down my computer", "second one", "the second one",
-            "second", "computer"
+            "second", "computer", "yes", "yeah", "sure", "do it", "confirm", "proceed", "ok", "okay"
         ]
         cancel_phrases = ["cancel", "neither", "never mind", "no", "nope", "stop"]
 
@@ -2231,10 +2155,10 @@ class JarvisEngine(QObject):
         self.pending_command_type = "sensitive_action"
         if chosen_type == SensitiveActionType.EXIT_APPLICATION:
             self.pending_command = "exit app"
-            confirm_prompt = f"Do you want me to close JARVIS, {salutation}-"
+            confirm_prompt = f"Do you want me to close JARVIS, {salutation}?"
         else:
             self.pending_command = "shut down pc"
-            confirm_prompt = f"Do you want me to shut down your PC, {salutation}-"
+            confirm_prompt = f"Do you want me to shut down your PC, {salutation}?"
 
         self.pending_confirmation_obj = PendingConfirmation(
             request_id=request_id,
@@ -2243,7 +2167,7 @@ class JarvisEngine(QObject):
             action_payload={"command": self.pending_command},
             source=source,
             created_at=time.time(),
-            expires_at=time.time() - 30.0
+            expires_at=time.time() + 30.0
         )
         self.transition_to("WAITING_FOR_CONFIRMATION")
         speech.speak(confirm_prompt, request_id=request_id)

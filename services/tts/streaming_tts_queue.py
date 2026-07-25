@@ -94,7 +94,7 @@ class StreamingTTSQueue:
         try:
             # Put item into bounded queue with timeout to handle backpressure safely
             self._item_queue.put(item, timeout=5.0)
-            logger.info(f"[STREAMING TTS] Enqueued sentence #{seq} for req {request_id[:8]}: '{text[:30]}...'")
+            logger.info(f"[STREAMING TTS] Enqueued sentence #{seq} for req {request_id}: '{text[:30]}...'")
             return True
         except queue.Full:
             logger.warning(f"[STREAMING TTS] Queue full ({self.max_size}), dropping sentence: '{text[:30]}...'")

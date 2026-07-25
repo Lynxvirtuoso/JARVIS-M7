@@ -51,3 +51,29 @@ class TrustGate:
         else:
             logger.warning(f"TrustGate: Unknown source '{tool_call.source}', default to CONFIRM")
             return CONFIRM
+
+    @staticmethod
+    def evaluate_plan(plan, source: str = "voice") -> "PlanConfirmation":
+        """
+        Evaluates an ExecutionPlan to determine net destructive effects and confirmation policy.
+        Returns PlanConfirmation object with required confirmations.
+        """
+        from services.tools.models import PlanConfirmation
+        destructive_steps = []
+        confirmations = []
+
+        for step in plan.steps:
+            if getattr(step, "destructive", False):
+                destructive_steps.append(step.tool_name)
+                confirmations.append(f"Are you sure you want to {step.action} using {step.tool_name}?")
+
+        requires_confirm = len(destructive_steps) > 0
+        logger.info(
+            f"TrustGate: Evaluated ExecutionPlan '{plan.plan_id}' | "
+            f"Requires Confirmation: {requires_confirm} | Destructive Count: {len(destructive_steps)}"
+        )
+        return PlanConfirmation(
+            requires_confirmation=requires_confirm,
+            confirmations_required=confirmations,
+            destructive_steps=destructive_steps,
+        )

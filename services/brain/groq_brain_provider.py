@@ -1,6 +1,7 @@
 import os
 import requests
 import json
+import time as _time
 from core.config import config
 from core.logger import logger
 from services.brain.base import BrainProvider, BrainResult
@@ -192,9 +193,12 @@ class GroqBrainProvider(BrainProvider):
         }
 
         try:
-            logger.info(f"Thinking (stream) via Brain provider: {self.provider_id} (model={model_name})")
+            _post_start = _time.monotonic()
+            logger.info(f"[TELEMETRY_LATENCY] Outbound Groq request sending... (model={model_name})")
             response = requests.post(url, headers=headers, json=payload, timeout=20, stream=True)
-            
+            _post_recv = _time.monotonic()
+            logger.info(f"[TELEMETRY_LATENCY] Groq HTTP response status {response.status_code} received in {(_post_recv - _post_start)*1000:.1f}ms")
+
             if response.status_code != 200:
                 error_text = response.text
                 if response.status_code == 429:
@@ -205,6 +209,7 @@ class GroqBrainProvider(BrainProvider):
                     return
                 raise RuntimeError(f"Groq Chat API error {response.status_code}: {error_text}")
 
+            _first_token_logged = False
             for line in response.iter_lines():
                 if line:
                     decoded = line.decode('utf-8').strip()
@@ -216,6 +221,9 @@ class GroqBrainProvider(BrainProvider):
                             chunk = json.loads(data_str)
                             content = chunk["choices"][0]["delta"].get("content", "")
                             if content:
+                                if not _first_token_logged:
+                                    _first_token_logged = True
+                                    logger.info(f"[TELEMETRY_LATENCY] Groq first token yielded after {(_time.monotonic() - _post_recv)*1000:.1f}ms from HTTP response (total {(_time.monotonic() - _post_start)*1000:.1f}ms)")
                                 yield content
                         except Exception:
                             pass

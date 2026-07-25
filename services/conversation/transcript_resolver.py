@@ -75,10 +75,15 @@ class TranscriptResolver:
         text = raw_text.strip()
         text_lower = text.lower()
 
+        # 0. Collapse repeated STT duplication (e.g. "JARVIS what is the time now? JARVIS what is the time now?")
+        text = self._collapse_repeated_phrases(text)
+        text_lower = text.lower()
+
         # 1. Wake word position detection
         wake_detected, wake_pos, text_without_wake = self._detect_and_strip_wake_word(text_lower, text)
 
         cleaned_text = text_without_wake.strip()
+        cleaned_text = self._collapse_repeated_phrases(cleaned_text)
         if not cleaned_text and wake_detected:
             # User just said "Jarvis" or "Jarvis?"
             return ResolvedTranscript(
@@ -151,10 +156,14 @@ class TranscriptResolver:
         needs_clarification = False
         clarification_question = None
 
+        from services.conversation.question_classifier import question_classifier
+        classification = question_classifier.classify(cleaned_text if cleaned_text else text)
+        is_conversational_question = classification.is_conversational
+
         if is_sensitive and final_confidence < 0.85:
             needs_clarification = True
             clarification_question = f"Did you ask me to {cleaned_text}?"
-        elif final_confidence < 0.40:
+        elif final_confidence < 0.40 and not is_conversational_question:
             needs_clarification = True
             clarification_question = f"Sorry Sir, I am not sure I understood: '{cleaned_text}'. Could you repeat that?"
 
@@ -173,29 +182,111 @@ class TranscriptResolver:
 
     def _detect_and_strip_wake_word(self, text_lower: str, original_text: str) -> Tuple[bool, Optional[str], str]:
         """
-        Detects wake word at start, middle, or end of string and strips it cleanly.
+        Detects wake word or any phonetic variant at start, middle, or end of string and strips it cleanly.
+        Uses FUZZY_VARIANTS, WAKE_PHRASES, and REJECT_WORDS from wake_word_constants.
         """
-        # Wake at start
-        start_pattern = r"^(hey\s+)?(jarvis|jervis|javis)[,\s]*"
-        if re.search(start_pattern, text_lower):
-            stripped = re.sub(start_pattern, "", original_text, flags=re.IGNORECASE).strip()
-            return True, "start", stripped
+        from services.conversation.wake_word_constants import (
+            WAKE_PHRASES, FUZZY_VARIANTS, REJECT_WORDS, WAKE_FUZZY_THRESHOLD,
+            WAKE_WORD_FUZZY_THRESHOLD, SERVICE_ACTION_VERBS
+        )
+        from difflib import SequenceMatcher
 
-        # Wake at end
-        end_pattern = r"[,\s]*(hey\s+)?(jarvis|jervis|javis)[\?\.]?$"
-        if re.search(end_pattern, text_lower):
-            stripped = re.sub(end_pattern, "", original_text, flags=re.IGNORECASE).strip()
-            return True, "end", stripped
+        text_clean = re.sub(r"[.,!-;:'\"]+", "", text_lower).strip()
+        all_words = text_clean.split()
+        word_set = set(all_words)
 
-        # Wake in middle
-        middle_pattern = r"\b(hey\s+)?(jarvis|jervis|javis)\b"
-        if re.search(middle_pattern, text_lower):
-            stripped = re.sub(middle_pattern, "", original_text, flags=re.IGNORECASE).strip()
-            # Clean double spaces
-            stripped = re.sub(r"\s+", " ", stripped).strip()
-            return True, "middle", stripped
+        if word_set and word_set.issubset(REJECT_WORDS):
+            return False, None, original_text
+
+        # Combine canonical phrases and phonetic mishear variants into candidate list
+        all_candidates = sorted(list(set(WAKE_PHRASES + FUZZY_VARIANTS)), key=len, reverse=True)
+
+        # 1. Check start of string (word-boundary aware)
+        for cand in all_candidates:
+            cand_pattern = r"^(hey\s+|wake\s+up\s+)?\b" + re.escape(cand) + r"\b[,\s]*"
+            if re.search(cand_pattern, text_clean):
+                orig_remainder = re.sub(cand_pattern, "", original_text, flags=re.IGNORECASE).strip()
+                if cand == "service" and orig_remainder:
+                    rem_words = orig_remainder.lower().split()
+                    first_word = re.sub(r"[.,!-;:'\"]+", "", rem_words[0]) if rem_words else ""
+                    if first_word not in SERVICE_ACTION_VERBS:
+                        continue
+                return True, "start", orig_remainder
+
+        # 2. Check end of string (word-boundary aware)
+        for cand in all_candidates:
+            cand_pattern = r"[,\s]*\b" + re.escape(cand) + r"\b[\?\.]?$"
+            if re.search(cand_pattern, text_clean):
+                orig_remainder = re.sub(cand_pattern, "", original_text, flags=re.IGNORECASE).strip()
+                return True, "end", orig_remainder
+
+        # 3. Check middle of string
+        for cand in all_candidates:
+            cand_pattern = r"\b" + re.escape(cand) + r"\b"
+            if re.search(cand_pattern, text_clean):
+                orig_remainder = re.sub(cand_pattern, "", original_text, flags=re.IGNORECASE).strip()
+                orig_remainder = re.sub(r"\s+", " ", orig_remainder).strip()
+                return True, "middle", orig_remainder
+
+        # 4. Fuzzy token matching for leading words
+        if all_words:
+            for cand in all_candidates:
+                cand_words = cand.split()
+                n = len(cand_words)
+                if len(all_words) >= n:
+                    token_slice = " ".join(all_words[:n])
+                    if SequenceMatcher(None, token_slice, cand).ratio() >= WAKE_WORD_FUZZY_THRESHOLD:
+                        orig_words = original_text.strip().split()
+                        orig_remainder = " ".join(orig_words[n:]).strip()
+                        return True, "start", orig_remainder
 
         return False, None, original_text
+
+    def _collapse_repeated_phrases(self, text: str) -> str:
+        """
+        Collapses STT-duplicated sentences, whole phrases, or trailing repeated segments.
+        E.g.:
+          'JARVIS what is the time now? JARVIS what is the time now?' -> 'JARVIS what is the time now?'
+          'what is it? Did you say that? Did you say that?' -> 'what is it? Did you say that?'
+        """
+        if not text or not text.strip():
+            return text
+
+        cleaned = text.strip()
+
+        # 1. Whole-sentence or clause duplication split by punctuation (?, ., !)
+        # Matches e.g. "X? X?" or "X. X."
+        parts = [p.strip() for p in re.split(r"(?<=[?.!])\s+", cleaned) if p.strip()]
+        if len(parts) >= 2:
+            from difflib import SequenceMatcher
+            collapsed_parts = []
+            for part in parts:
+                if not collapsed_parts:
+                    collapsed_parts.append(part)
+                else:
+                    prev = collapsed_parts[-1].lower().strip(" ?,.!")
+                    curr = part.lower().strip(" ?,.!")
+                    ratio = SequenceMatcher(None, prev, curr).ratio()
+                    if ratio < 0.85:
+                        collapsed_parts.append(part)
+            cleaned = " ".join(collapsed_parts)
+
+        # 2. Sequential phrase repetition split by clauses (commas or space-separated duplicate blocks)
+        # Matches e.g. "Did you say that? Did you say that?" or "what is the time, what is the time"
+        tokens = cleaned.split()
+        if len(tokens) >= 4:
+            # Check if second half of tokens is exact or near-exact match of first half
+            mid = len(tokens) // 2
+            for size in range(mid, 1, -1):
+                first_block = " ".join(tokens[-2*size:-size]).lower().strip(" ?,.!")
+                second_block = " ".join(tokens[-size:]).lower().strip(" ?,.!")
+                if len(first_block) > 5:
+                    from difflib import SequenceMatcher
+                    if SequenceMatcher(None, first_block, second_block).ratio() >= 0.85:
+                        cleaned = " ".join(tokens[:-size])
+                        break
+
+        return cleaned
 
 
 # Global resolver instance

@@ -171,8 +171,10 @@ class SpeechEngine(threading.Thread):
             return req_id_str
 
         ctx = pipeline_timer.get_thread_context()
-        if ctx is None:
+        if ctx is None or ctx.request_id != req_id_str:
             ctx = TelemetryContext(sanitized, request_id=req_id_str)
+            if should_begin:
+                pipeline_timer.set_thread_context(ctx)
         else:
             ctx.request_id = req_id_str
 
@@ -369,6 +371,7 @@ class SpeechEngine(threading.Thread):
                                 self._lifecycles[req_id].provider_playing = False
                     self.current_spoken_sentence = ""
                     self.speech_end_time = time.time()
+                    pipeline_timer.active_playing_context = None
                     self.audio_queue.task_done()
 
                     # Post-playback check: only emit speech_ended if request remains active

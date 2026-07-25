@@ -123,133 +123,20 @@ except ImportError:
     WHISPER_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
-# Wake phrase matching â€” canonical forms and accent/STT variant lists
+# Wake phrase matching — canonical forms and accent/STT variant lists
 # ---------------------------------------------------------------------------
-
-# Canonical wake phrases JARVIS accepts as definitive matches
-WAKE_PHRASES = [
-    "jarvis",
-    "hey jarvis",
-    "wake up jarvis",
-    "hello jarvis",
-]
-
-# All accent / STT mishear variants â€” treated as exact matches when found in text.
-# Expanding for Indian-English common mishearings: jollis, javish, jarvish, jar wish
-FUZZY_VARIANTS = [
-    # Single-word Jarvis variants
-    "javis", "jarves", "charvis", "jaavas", "jarvez", "jarvas",
-    "javish", "jarvish", "jollis", "jarviz", "jarfish", "jarvi",
-    "jar vis", "jar fis", "jar face", "jar miss", "jar vice",
-    # wake-up - variant
-    "wake up jervis", "wake up javis", "wake up javish",
-    "wake up jarvish", "wake up jollis", "wake up jar wish",
-    "wake up jarviz", "wake up jarves", "wake up jaarvis",
-    "wake up service", "wake up jars", "wake up jealous",
-    # hey - variant
-    "hey jervis", "hey javis", "hey javish",
-    "hey jarvish", "hey jollis", "hey jar wish",
-    "hey jarviz", "hey charvis",
-    # jar wish as two words
-    "jar wish",
-]
-
-# Words that must NOT trigger wake even if they score high on fuzzy
-REJECT_WORDS = {
-    "hope", "yes", "jobless", "mewd", "okay", "no", "yeah",
-    "welcome", "goodbye", "hello", "ciao", "mutual", "knowledge",
-    "julius", "travis", "paris", "hollis",
-}
-
-# Fuzzy ratio threshold for full-phrase wake matching
-WAKE_FUZZY_THRESHOLD = 0.80
-
-# Fuzzy ratio threshold for single-word "is this a Jarvis-like word-" check
-WAKE_WORD_FUZZY_THRESHOLD = 0.65
-
+from services.conversation.wake_word_constants import (
+    WAKE_PHRASES, FUZZY_VARIANTS, REJECT_WORDS, WAKE_FUZZY_THRESHOLD, WAKE_WORD_FUZZY_THRESHOLD
+)
 
 def is_wake_phrase(transcription: str) -> tuple[bool, str]:
     """
-    Check if transcription matches a wake phrase using exact - fuzzy matching.
-
-    Returns:
-        (matched: bool, canonical: str)
-        `canonical` is the matched WAKE_PHRASES entry (or variant label) for logging.
-        If not matched, canonical is an empty string.
-
-    Pass order (reject-words checked first, wins over ALL fuzzy passes):
-        1. Exact canonical phrase substring
-        2. Exact variant / mishear substring
-        3. Full-phrase SequenceMatcher fuzzy (threshold WAKE_FUZZY_THRESHOLD)
-        4. Per-word fuzzy against 'jarvis' (threshold WAKE_WORD_FUZZY_THRESHOLD)
-           â€” reject words are skipped INSIDE this loop too.
+    Delegates wake phrase evaluation to TranscriptResolver.
     """
-    text = transcription.lower().strip()
-    # Remove common punctuation
-    text = re.sub(r"[.,!-;:'\"]-", "", text).strip()
-
-    if not text or len(text) < 3:
-        return False, ""
-
-    # Reject known false positives â€” checked BEFORE any fuzzy pass
-    all_words = text.split()
-    word_set = set(all_words)
-    if word_set.issubset(REJECT_WORDS):
-        logger.info(f"Wake phrase rejected: raw='{text}', reason='reject word'")
-        return False, ""
-
-    # ---- Pass 1: Exact canonical phrase substring check ----
-    for phrase in WAKE_PHRASES:
-        if phrase in text:
-            logger.info(
-                f"Wake phrase matched: raw='{text}', canonical='{phrase}', method='exact'"
-            )
-            return True, phrase
-
-    # ---- Pass 2: Exact variant / mishear substring check ----
-    for variant in FUZZY_VARIANTS:
-        if variant in text:
-            logger.info(
-                f"Wake phrase matched: raw='{text}', canonical='wake up jarvis', method='variant'"
-            )
-            return True, "wake up jarvis"
-
-    # ---- Pass 3: SequenceMatcher fuzzy on full text vs each wake phrase ----
-    # Ensure length/word constraint to prevent false wake triggers
-    has_wake_context = any(w in all_words for w in ["wake", "hey", "hello", "hi", "up"])
-
-    for phrase in WAKE_PHRASES:
-        ratio = SequenceMatcher(None, text, phrase).ratio()
-        if ratio >= WAKE_FUZZY_THRESHOLD:
-            if len(text) < 4:
-                continue
-            if len(all_words) > 2 and not has_wake_context:
-                logger.info(f"Wake check dismissed: raw='{text}', reason='fuzzy wake without wake context'")
-                return False, ""
-            logger.info(
-                f"Wake phrase matched: raw='{text}', canonical='{phrase}', "
-                f"method='fuzzy', score={ratio:.2f}"
-            )
-            return True, phrase
-
-    # ---- Pass 4: Per-word fuzzy against 'jarvis' ----
-    for word in all_words:
-        if len(word) < 4:
-            continue
-        if word in REJECT_WORDS:          # per-word reject guard
-            continue
-        ratio = SequenceMatcher(None, word, "jarvis").ratio()
-        if ratio >= WAKE_WORD_FUZZY_THRESHOLD:
-            if len(all_words) > 2 and not has_wake_context:
-                logger.info(f"Wake check dismissed: raw='{text}', reason='fuzzy wake without wake context'")
-                return False, ""
-            logger.info(
-                f"Wake phrase matched: raw='{text}', canonical='jarvis', "
-                f"method='word_fuzzy', score={ratio:.2f} (word='{word}')"
-            )
-            return True, "jarvis"
-
-    logger.info(f"Wake check dismissed: raw='{text}', reason='no match'")
+    from services.conversation.transcript_resolver import transcript_resolver
+    resolved_tr = transcript_resolver.resolve(transcription)
+    if resolved_tr.wake_word_detected:
+        return True, "wake up jarvis"
     return False, ""
 
 
@@ -307,6 +194,7 @@ class AudioService(threading.Thread):
         self.is_transcribing_wake = False
         self.is_collecting_wake = False
         self.wake_silence_counter = 0
+        self.wake_consecutive_voice = 0
 
         # TTS Interruption parameters (entirely separate from wake/command)
         self.interrupt_voice_buffer = []
@@ -664,7 +552,7 @@ class AudioService(threading.Thread):
         else:
             self.command_buffer.append(chunk)
             if rms < self.silence_threshold:
-                self.silence_counter -= 1
+                self.silence_counter += 1
             else:
                 self.silence_counter = 0
 
@@ -711,18 +599,22 @@ class AudioService(threading.Thread):
             self._check_clap(rms)
 
         # B. Voice Wake Phrase Detection
-        if self.wake_word_enabled and rms > self.wake_trigger_threshold and not self.is_transcribing_wake:
-            if not self.is_collecting_wake:
-                self.is_collecting_wake = True
-                self.wake_voice_buffer = []
-                self.wake_silence_counter = 0
-                logger.info(f"Voice activity detected in passive mode. RMS: {rms:.4f}")
+        if self.wake_word_enabled and not self.is_transcribing_wake:
+            if rms > self.wake_trigger_threshold:
+                self.wake_consecutive_voice += 1
+                if not self.is_collecting_wake and self.wake_consecutive_voice >= 4:
+                    self.is_collecting_wake = True
+                    self.wake_voice_buffer = []
+                    self.wake_silence_counter = 0
+                    logger.info(f"Voice activity detected in passive mode ({self.wake_consecutive_voice} consecutive chunks). RMS: {rms:.4f}")
+            else:
+                self.wake_consecutive_voice = 0
 
         if self.wake_word_enabled and self.is_collecting_wake:
             self.wake_voice_buffer.append(chunk)
 
             if rms < self.wake_trigger_threshold:
-                self.wake_silence_counter -= 1
+                self.wake_silence_counter += 1
             else:
                 self.wake_silence_counter = 0
 
@@ -856,26 +748,45 @@ class AudioService(threading.Thread):
         window_size = min(8, len(chunk_rms_values))
         if window_size > 0:
             sliding_rms = []
-            for i in range(len(chunk_rms_values) - window_size - 1):
-                window_mean_square = np.mean([r**2 for r in chunk_rms_values[i:i-window_size]])
+            for i in range(max(1, len(chunk_rms_values) - window_size + 1)):
+                window_mean_square = np.mean([r**2 for r in chunk_rms_values[i:i+window_size]])
                 sliding_rms.append(np.sqrt(window_mean_square))
-            raw_rms = max(sliding_rms) if sliding_rms else 0.0
+            raw_rms = max(sliding_rms) if sliding_rms else max(chunk_rms_values)
         else:
-            raw_rms = 0.0
+            raw_rms = float(np.sqrt(np.mean(audio_data**2))) if len(audio_data) > 0 else 0.0
 
-        avg_rms = np.sqrt(np.mean(audio_data**2))
-        peak_val = np.max(np.abs(audio_data))
+        avg_rms = float(np.sqrt(np.mean(audio_data**2))) if len(audio_data) > 0 else 0.0
+        peak_val = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
 
         # Pre-STT audio quality gate check (discard if raw_rms is close to calibrated ambient floor)
         rms_margin = raw_rms - self.ambient_rms
-        if rms_margin < 0.025:
+        snr_ratio = (raw_rms / self.ambient_rms) if self.ambient_rms > 0 else (raw_rms / 0.0001)
+
+        # Dynamic quality check: require SNR ratio >= 1.25 OR absolute RMS margin >= 0.003
+        min_snr = float(config.get("audio_quality_gate_min_snr", "1.25"))
+        min_margin = float(config.get("audio_quality_gate_min_margin", "0.003"))
+        
+        gate_passed = (snr_ratio >= min_snr) or (rms_margin >= min_margin)
+
+        logger.info(
+            f"[AUDIO_QUALITY_GATE_EVAL] raw_rms={raw_rms:.6f}, avg_rms={avg_rms:.6f}, peak_val={peak_val:.6f}, "
+            f"ambient_rms={self.ambient_rms:.6f}, rms_margin={rms_margin:.6f}, snr_ratio={snr_ratio:.2f}, gate_passed={gate_passed}"
+        )
+
+        if not gate_passed:
             logger.warning(
-                f"Audio quality gate triggered: raw_rms ({raw_rms:.6f}) - ambient_rms ({self.ambient_rms:.6f}) "
-                f"= {rms_margin:.6f} which is below min_margin 0.025. Skipping STT."
+                f"[AUDIO_QUALITY_GATE_REJECT] raw_rms={raw_rms:.6f}, avg_rms={avg_rms:.6f}, peak_val={peak_val:.6f}, "
+                f"ambient_rms={self.ambient_rms:.6f}, rms_margin={rms_margin:.6f} < {min_margin:.6f}, "
+                f"snr_ratio={snr_ratio:.2f} < {min_snr:.2f}. Skipping STT."
             )
-            bus.console_log.emit("WARN", "Command skipped: audio level too close to noise floor")
+            bus.console_log.emit("WARN", f"Command skipped: audio level too close to noise floor (margin={rms_margin:.4f}, SNR={snr_ratio:.2f})")
             bus.command_transcription_failed.emit("audio too close to noise floor")
             return
+        else:
+            logger.info(
+                f"[AUDIO_QUALITY_GATE_PASS] raw_rms={raw_rms:.6f}, avg_rms={avg_rms:.6f}, peak_val={peak_val:.6f}, "
+                f"ambient_rms={self.ambient_rms:.6f}, rms_margin={rms_margin:.6f}, snr_ratio={snr_ratio:.2f}. Passing to STT."
+            )
 
         # Safe audio volume processing & peak scaling
         proc_res = process_audio_safely(audio_data)
@@ -1127,7 +1038,7 @@ class AudioService(threading.Thread):
             self.interrupt_voice_buffer.append(chunk)
 
             if rms < self.wake_trigger_threshold:
-                self.interrupt_silence_counter -= 1
+                self.interrupt_silence_counter += 1
             else:
                 self.interrupt_silence_counter = 0
 
