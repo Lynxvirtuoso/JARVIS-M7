@@ -42,6 +42,7 @@ class ExecutionPlan:
     steps: List[ToolStep] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     context: Dict[str, Any] = field(default_factory=dict)
+    cacheable: bool = True
 
 
 @dataclass

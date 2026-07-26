@@ -1122,12 +1122,12 @@ class JarvisEngine(QObject):
         else:
             raw_text = str(raw_command)
             import uuid
-            import time
             request_id = uuid.uuid4().hex
             audio_quality = 1.0
             stt_confidence = 0.90
             req = ConversationRequest(
                 request_id=request_id,
+
                 session_id="default_session",
                 raw_transcript=raw_text,
                 cleaned_transcript=raw_text,
@@ -1148,9 +1148,17 @@ class JarvisEngine(QObject):
             if self._try_resolve_ambiguous_choice(raw_text, source, session_id, request_id):
                 return
 
+        # Ensure stale confirmation state is cleared if state machine is no longer in WAITING_FOR_CONFIRMATION
+        if self.state != "WAITING_FOR_CONFIRMATION":
+            self.pending_confirmation_obj = None
+            self.pending_command = None
+            self.pending_command_type = None
+            self.pending_action_choice = None
+
         if getattr(self, "pending_confirmation_obj", None) or self.pending_command:
             normalized_ans = raw_text.lower().strip()
             logger.info(f"Confirmation response [Req ID: {request_id[:8]}]: '{raw_text}'")
+
 
             # Check expiration
             conf_obj = getattr(self, "pending_confirmation_obj", None)
@@ -1558,13 +1566,21 @@ class JarvisEngine(QObject):
                 self.sleep_jarvis()
             return
 
-        # PART E â€” Incomplete deterministic app commands check
+        # PART E — Incomplete deterministic app commands check
         INCOMPLETE_APP_COMMANDS = {"open", "close", "launch", "start", "run", "stop", "kill", "exit"}
         if cmd_stripped in INCOMPLETE_APP_COMMANDS:
             self._speak_and_return_to_session("Which app should I close, Sir?")
             return
 
-        # PART G â€” Protected Lifecycle Phrases Fuzzy Protection
+        # PART G — Protected Lifecycle Phrases Fuzzy Protection
+        # NOTE: compound EXIT_APPLICATION phrases like "shutdown jarvis" / "jarvis shutdown" must
+        # NOT be caught here — they already carry EXIT_APPLICATION intent and are handled by
+        # TranscriptResolver + the lifecycle trigger check above.
+        # Only bare lifecycle words ("shutdown", "sleep", etc.) receive fuzzy disambiguation here.
+        _EXIT_COMPOUND_BYPASS = {
+            "shutdown jarvis", "shut down jarvis",
+            "jarvis shutdown", "jarvis shut down",
+        }
         PROTECTED_LIFECYCLE_PHRASES = [
             "sleep",
             "standby",
@@ -1578,10 +1594,11 @@ class JarvisEngine(QObject):
         ]
 
         is_lifecycle_phrase = False
-        for phrase in PROTECTED_LIFECYCLE_PHRASES:
-            if SequenceMatcher(None, cmd_stripped, phrase).ratio() >= 0.7:
-                is_lifecycle_phrase = True
-                break
+        if cmd_stripped not in _EXIT_COMPOUND_BYPASS:
+            for phrase in PROTECTED_LIFECYCLE_PHRASES:
+                if SequenceMatcher(None, cmd_stripped, phrase).ratio() >= 0.7:
+                    is_lifecycle_phrase = True
+                    break
 
         if is_lifecycle_phrase:
             logger.info(f"Protected lifecycle phrase detected/fuzzy-matched: '{cmd_stripped}'")
@@ -2391,7 +2408,6 @@ class JarvisEngine(QObject):
             from services.phone_bridge import trigger_phone_call
             success, msg = trigger_phone_call(number)
             if not success:
-                speech.speak(msg)
                 if getattr(self, "last_command_source", "") == "telegram":
                     chat_id = getattr(self, "last_telegram_chat_id", None)
                     if chat_id:
@@ -2399,6 +2415,7 @@ class JarvisEngine(QObject):
                 return msg
 
             return f"Placing call to {name}, {salutation}."
+
 
         # Handle direct file creation confirmed executions
         if command.startswith("create_file_confirmed:"):

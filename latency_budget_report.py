@@ -79,7 +79,10 @@ class LatencyBudgetReport:
                         markers[key] = {}
                     markers[key][stage] = float(ts_str)
 
-        # 2. Extract marker timestamps from log line timestamps or TELEMETRY_LATENCY events
+        # 2. Extract marker timestamps from log-line timestamps or TELEMETRY_LATENCY events.
+        # IMPORTANT: only store if NOT already present — the primary pattern (above) extracts
+        # high-precision ts= epoch values; this fallback uses millisecond log timestamps which
+        # are less precise. Overwriting would corrupt network_and_queue_time and streaming_time.
         log_ts_pattern = re.compile(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}).* agent_stage:([^:]+):([^:]+):([^:]+):([^:]+):")
         telemetry_latency_pattern = re.compile(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}).*\[TELEMETRY_LATENCY\]\s+(.*)")
         step_event_pattern = re.compile(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}).*\[TELEMETRY\].*Event:\s+agent_step_(start|end):(\w+)")
@@ -100,6 +103,7 @@ class LatencyBudgetReport:
                     key = f"{req_id}:{step_id}:{role}"
                     if key not in markers:
                         markers[key] = {}
+                    # Only store if not already set by the high-precision ts= parser above
                     if stage not in markers[key]:
                         markers[key][stage] = epoch_ts
                 except Exception:
@@ -138,9 +142,18 @@ class LatencyBudgetReport:
                     if "Outbound Groq request sending" in msg or "Attempting provider" in msg:
                         if "provider_request_sent" not in markers[key]:
                             markers[key]["provider_request_sent"] = epoch_ts
-                    elif "first token yielded" in msg or "Groq HTTP response status" in msg:
+                    elif "first token yielded" in msg:
+                        # High-precision first_token from provider log
                         if "first_token_received" not in markers[key]:
                             markers[key]["first_token_received"] = epoch_ts
+                    elif "Groq HTTP response status" in msg and "200" in msg:
+                        # HTTP 200 reception = proxy for provider_request round-trip complete
+                        if "provider_request_sent" not in markers[key]:
+                            markers[key]["provider_request_sent"] = epoch_ts
+                    elif "stream complete" in msg.lower() or "last token" in msg.lower() or "stream finished" in msg.lower():
+                        # last_token_received — from stream-completion telemetry log
+                        if "last_token_received" not in markers[key]:
+                            markers[key]["last_token_received"] = epoch_ts
                 except Exception:
                     pass
 
@@ -152,7 +165,9 @@ class LatencyBudgetReport:
 
             req_sent = m_dict.get("provider_request_sent")
             first_tok = m_dict.get("first_token_received")
-            last_tok = m_dict.get("last_token_received") or m_dict.get("first_token_received")
+            last_tok = m_dict.get("last_token_received")
+            # NOTE: do NOT fall back last_tok = first_tok here — that produces a false 0ms
+            # streaming_time. If last_token_received is absent, omit streaming_time entirely.
 
             if req_sent and first_tok and first_tok >= req_sent:
                 net_dur = (first_tok - req_sent) * 1000.0
@@ -160,7 +175,7 @@ class LatencyBudgetReport:
                     data[role]["network_and_queue_time"] = []
                 data[role]["network_and_queue_time"].append(net_dur)
 
-            if first_tok and last_tok and last_tok >= first_tok:
+            if first_tok and last_tok and last_tok > first_tok:
                 stream_dur = (last_tok - first_tok) * 1000.0
                 if "streaming_time" not in data[role]:
                     data[role]["streaming_time"] = []

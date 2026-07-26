@@ -131,26 +131,43 @@ class TranscriptResolver:
         is_sensitive = any(kw in cleaned_text.lower() or kw in text_lower for kw in SENSITIVE_KEYWORDS)
         sensitive_type = None
         if is_sensitive:
-            if any(k in text_lower for k in ["close jarvis", "exit app", "close application", "exit jarvis"]):
+            # --- Compound EXIT_APPLICATION phrases ---
+            # Strip punctuation from raw text and also test against recombined text
+            # so spoken STT transcripts like "Shut down, Jarvis." or "Jarvis, shut down."
+            # reliably resolve to EXIT_APPLICATION regardless of wake word position.
+            clean_raw_lower = re.sub(r"[.,!-;:'\"]+", "", text_lower).strip()
+            _EXIT_COMPOUND_PHRASES = [
+                "shutdown jarvis", "shut down jarvis",
+                "jarvis shutdown", "jarvis shut down",
+            ]
+            recombined = f"{cleaned_text.lower()} jarvis" if wake_detected else clean_raw_lower
+            recombined_alt = f"jarvis {cleaned_text.lower()}" if wake_detected else clean_raw_lower
+
+            if any(p in clean_raw_lower or p in recombined or p in recombined_alt for p in _EXIT_COMPOUND_PHRASES):
                 sensitive_type = SensitiveActionType.EXIT_APPLICATION
-            elif any(k in text_lower for k in ["shut down pc", "shutdown computer", "turn off pc"]):
+            elif any(k in clean_raw_lower for k in ["close jarvis", "exit app", "close application", "exit jarvis"]):
+                sensitive_type = SensitiveActionType.EXIT_APPLICATION
+            elif any(k in clean_raw_lower for k in ["shut down pc", "shutdown computer", "turn off pc"]):
                 sensitive_type = SensitiveActionType.SHUTDOWN_COMPUTER
-            elif any(k in text_lower for k in ["restart pc", "reboot computer", "reboot"]):
+            elif any(k in clean_raw_lower for k in ["restart pc", "reboot computer", "reboot"]):
                 sensitive_type = SensitiveActionType.RESTART_COMPUTER
-            elif any(k in text_lower for k in ["log out", "logout"]):
+
+            elif any(k in clean_raw_lower for k in ["log out", "logout"]):
                 sensitive_type = SensitiveActionType.LOG_OUT_WINDOWS
-            elif any(k in text_lower for k in ["lock pc", "lock computer"]):
+            elif any(k in clean_raw_lower for k in ["lock pc", "lock computer"]):
                 sensitive_type = SensitiveActionType.LOCK_COMPUTER
-            elif any(k in text_lower for k in ["delete"]):
+            elif any(k in clean_raw_lower for k in ["delete"]):
                 sensitive_type = SensitiveActionType.DELETE_FILE
-            elif any(k in text_lower for k in ["send email"]):
+            elif any(k in clean_raw_lower for k in ["send email"]):
                 sensitive_type = SensitiveActionType.SEND_EMAIL
-            elif any(k in text_lower for k in ["send message"]):
+            elif any(k in clean_raw_lower for k in ["send message"]):
                 sensitive_type = SensitiveActionType.SEND_MESSAGE
-            elif any(k in text_lower for k in ["place call", "call"]):
+            elif any(k in clean_raw_lower for k in ["place call", "call"]):
                 sensitive_type = SensitiveActionType.PLACE_CALL
             else:
                 sensitive_type = SensitiveActionType.AMBIGUOUS_SHUTDOWN
+
+
 
         # Decision thresholding
         needs_clarification = False

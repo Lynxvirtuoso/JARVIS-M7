@@ -326,7 +326,7 @@ class OllamaBrainProvider(BrainProvider):
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=5.0) as response:
+            with urllib.request.urlopen(req, timeout=30.0) as response:
                 self.record_service_success()
                 for line in response:
                     if line:

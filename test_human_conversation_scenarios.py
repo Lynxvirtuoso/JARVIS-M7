@@ -128,9 +128,31 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
         self.assertTrue(res.is_sensitive_action)
         self.assertEqual(res.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
 
-    def test_generic_shutdown_is_ambiguous(self):
-        """'shutdown' alone is ambiguous and must NOT map to EXIT_APPLICATION or SHUTDOWN_COMPUTER directly."""
+    def test_jarvis_shutdown_compound_maps_to_exit_application(self):
+        """'jarvis shutdown' compound phrase → EXIT_APPLICATION (wake-word + exit verb = unambiguous app exit).
+        Previously asserted AMBIGUOUS_SHUTDOWN — that was the bug: wake-word stripping destroyed the
+        compound context, leaving bare 'shutdown' which fell to AMBIGUOUS. Fixed by checking
+        the compound against pre-strip text_lower before stripping consumes the context."""
         res = self.resolver.resolve("jarvis shutdown")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
+
+    def test_shutdown_jarvis_compound_maps_to_exit_application(self):
+        """'shutdown jarvis' (verb-first compound) → EXIT_APPLICATION."""
+        res = self.resolver.resolve("shutdown jarvis")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
+
+    def test_shut_down_jarvis_compound_maps_to_exit_application(self):
+        """'shut down jarvis' (two-word verb + wake-word) → EXIT_APPLICATION."""
+        res = self.resolver.resolve("shut down jarvis")
+        self.assertTrue(res.is_sensitive_action)
+        self.assertEqual(res.sensitive_action_type, SensitiveActionType.EXIT_APPLICATION)
+
+    def test_bare_shutdown_without_context_is_ambiguous(self):
+        """Bare 'shutdown' with no Jarvis compound context → AMBIGUOUS_SHUTDOWN.
+        The disambiguation prompt ('Did you mean close JARVIS or shut down the computer?') must still fire."""
+        res = self.resolver.resolve("shutdown")
         self.assertTrue(res.is_sensitive_action)
         self.assertEqual(res.sensitive_action_type, SensitiveActionType.AMBIGUOUS_SHUTDOWN)
 
@@ -143,6 +165,7 @@ class TestListeningReliabilityPhase1(unittest.TestCase):
     def test_restart_maps_to_restart_computer(self):
         res = self.resolver.resolve("restart pc")
         self.assertEqual(res.sensitive_action_type, SensitiveActionType.RESTART_COMPUTER)
+
 
     # ----- 4. Sensitive Action Execution Mapping (SystemPowerController) -----
 

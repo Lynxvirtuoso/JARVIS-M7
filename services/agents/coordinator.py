@@ -230,12 +230,13 @@ class AgentCoordinator:
                 step_index += 1
                 continue
 
-            # 3. Execute Step Agent
+            # 3. Execute Step Agent with PlannerCache lookup gate
             agent = self._agents[step.agent_role]
             step_params = dict(step.params)
             requires_memory = step.requires_memory
-            if step.step_id in executor_overrides:
-                override_dict = executor_overrides[step.step_id]
+            override_key = step.step_id if step.step_id in executor_overrides else (step.agent_role.value if step.agent_role.value in executor_overrides else None)
+            if override_key:
+                override_dict = dict(executor_overrides[override_key])
                 if "requires_memory" in override_dict:
                     requires_memory = override_dict.pop("requires_memory")
                 step_params.update(override_dict)
@@ -261,10 +262,37 @@ class AgentCoordinator:
             )
             setattr(agent_input, "step_id", step.step_id)
 
+            # Planner Cache Pre-Invocation Lookup Gate
+            from services.brain.planner_cache import planner_cache, PlannerCache
+            cache_key = None
+            cached_plan = None
+            if step.agent_role == AgentRole.PLANNER:
+                profile_name = routing_decision.profile.name if hasattr(routing_decision, "profile") and routing_decision.profile else "FULL_REASONING"
+                cache_key = PlannerCache.make_key(raw_command, profile_name)
+                cached_plan = planner_cache.get(cache_key)
+                if cached_plan is not None:
+                    logger.info(f"PlannerCache HIT for key {cache_key[:8]}... (Request: '{raw_command[:40]}')")
+
             try:
                 from core.telemetry import pipeline_timer
                 pipeline_timer.log_event(f"agent_step_start:{step.agent_role.value}")
-                res = agent.run(agent_input, step_params)
+                if cached_plan is not None:
+                    res = AgentOutput(
+                        agent_role=AgentRole.PLANNER,
+                        status=AgentStepStatus.SUCCESS,
+                        output=cached_plan,
+                        structured_result=cached_plan,
+                        context_writes={"execution_plan": cached_plan}
+                    )
+                else:
+                    res = agent.run(agent_input, step_params)
+
+                    # Post-contract-validation cache write for Planner
+                    if step.agent_role == AgentRole.PLANNER and cache_key and res.status == AgentStepStatus.SUCCESS:
+                        plan_obj = getattr(res, "structured_result", None) or getattr(res, "output", None)
+                        if isinstance(plan_obj, ExecutionPlan) and getattr(plan_obj, "cacheable", True):
+                            planner_cache.set(cache_key, plan_obj)
+
                 pipeline_timer.log_event(f"agent_step_end:{step.agent_role.value}")
                 res.step_id = step.step_id
             except Exception as ex:
