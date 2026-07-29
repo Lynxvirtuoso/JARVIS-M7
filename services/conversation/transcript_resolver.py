@@ -9,6 +9,12 @@ from typing import List, Optional, Tuple
 from services.conversation.models import ResolvedTranscript, SensitiveActionType
 
 
+def _contains_keyword(text: str, keyword: str) -> bool:
+    """Word-boundary-aware substring check for multi-word or single-word keywords."""
+    pattern = r"\b" + re.escape(keyword) + r"\b"
+    return re.search(pattern, text) is not None
+
+
 WAKE_VARIANTS = [r"\bjarvis\b", r"\bjervis\b", r"\bjavis\b", r"\bhey jarvis\b"]
 
 SENSITIVE_KEYWORDS = {
@@ -128,7 +134,10 @@ class TranscriptResolver:
             )
 
         # Check general sensitive action keywords (checking both cleaned text and full raw text)
-        is_sensitive = any(kw in cleaned_text.lower() or kw in text_lower for kw in SENSITIVE_KEYWORDS)
+        is_sensitive = any(
+            _contains_keyword(cleaned_text.lower(), kw) or _contains_keyword(text_lower, kw)
+            for kw in SENSITIVE_KEYWORDS
+        )
         sensitive_type = None
         if is_sensitive:
             # --- Compound EXIT_APPLICATION phrases ---
@@ -145,29 +154,27 @@ class TranscriptResolver:
 
             if any(p in clean_raw_lower or p in recombined or p in recombined_alt for p in _EXIT_COMPOUND_PHRASES):
                 sensitive_type = SensitiveActionType.EXIT_APPLICATION
-            elif any(k in clean_raw_lower for k in ["close jarvis", "exit app", "close application", "exit jarvis"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["close jarvis", "exit app", "close application", "exit jarvis"]):
                 sensitive_type = SensitiveActionType.EXIT_APPLICATION
-            elif any(k in clean_raw_lower for k in ["shut down pc", "shutdown computer", "turn off pc"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["shut down pc", "shutdown computer", "turn off pc"]):
                 sensitive_type = SensitiveActionType.SHUTDOWN_COMPUTER
-            elif any(k in clean_raw_lower for k in ["restart pc", "reboot computer", "reboot"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["restart pc", "reboot computer", "reboot"]):
                 sensitive_type = SensitiveActionType.RESTART_COMPUTER
 
-            elif any(k in clean_raw_lower for k in ["log out", "logout"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["log out", "logout"]):
                 sensitive_type = SensitiveActionType.LOG_OUT_WINDOWS
-            elif any(k in clean_raw_lower for k in ["lock pc", "lock computer"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["lock pc", "lock computer"]):
                 sensitive_type = SensitiveActionType.LOCK_COMPUTER
-            elif any(k in clean_raw_lower for k in ["delete"]):
+            elif _contains_keyword(clean_raw_lower, "delete"):
                 sensitive_type = SensitiveActionType.DELETE_FILE
-            elif any(k in clean_raw_lower for k in ["send email"]):
+            elif _contains_keyword(clean_raw_lower, "send email"):
                 sensitive_type = SensitiveActionType.SEND_EMAIL
-            elif any(k in clean_raw_lower for k in ["send message"]):
+            elif _contains_keyword(clean_raw_lower, "send message"):
                 sensitive_type = SensitiveActionType.SEND_MESSAGE
-            elif any(k in clean_raw_lower for k in ["place call", "call"]):
+            elif any(_contains_keyword(clean_raw_lower, k) for k in ["place call", "call"]):
                 sensitive_type = SensitiveActionType.PLACE_CALL
             else:
                 sensitive_type = SensitiveActionType.AMBIGUOUS_SHUTDOWN
-
-
 
         # Decision thresholding
         needs_clarification = False
@@ -232,7 +239,7 @@ class TranscriptResolver:
 
         # 2. Check end of string (word-boundary aware)
         for cand in all_candidates:
-            cand_pattern = r"[,\s]*\b" + re.escape(cand) + r"\b[\?\.]?$"
+            cand_pattern = r"[,\s]*\b" + re.escape(cand) + r"\b[\?\.]+$"
             if re.search(cand_pattern, text_clean):
                 orig_remainder = re.sub(cand_pattern, "", original_text, flags=re.IGNORECASE).strip()
                 return True, "end", orig_remainder

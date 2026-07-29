@@ -79,12 +79,12 @@ def parse_file_creation(command: str):
         return None
 
     # Unified regex pattern supporting action verbs, optional file indicators, and locations
-    pattern = r"\b(-:create|make|write|generate)\b\s-(-:a\s-)-(-:new\s-)-(-:text\s-)-(-:file\s-)-(-:called\s-)-(.--)(-:\s-(-:in|on|at)\s-(desktop|documents|downloads|workspace|current directory|current folder))-$"
+    pattern = r"\b(?:create|make|write|generate)\b\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?(?:file\s+)?(?:called\s+)?(.+?)(?:\s+(?:in|on|at)\s+(desktop|documents|downloads|workspace|current directory|current folder))?$"
 
     match = re.search(pattern, cmd)
     if match:
         filename = match.group(1).strip()
-        location = match.group(2).strip() if (len(match.groups()) > 1 and match.group(2)) else "workspace"
+        location = match.group(2).strip() if match.group(2) else "workspace"
 
         # Default to .txt if no extension is present
         if "." not in filename:
@@ -2446,6 +2446,28 @@ class JarvisEngine(QObject):
             except Exception as e:
                 logger.error(f"Failed to create file: {e}")
                 return f"I failed to create the file {filename}, {salutation}."
+
+        # Handle confirmed file deletion
+        if command.startswith("delete_file_confirmed:"):
+            filepath = command[len("delete_file_confirmed:"):].strip()
+            display = os.path.basename(filepath)
+            try:
+                if os.path.isdir(filepath):
+                    if os.listdir(filepath):
+                        return f"The folder '{display}' is not empty, {salutation}. Please empty it first."
+                    os.rmdir(filepath)
+                    logger.info(f"Directory deleted (confirmed): '{filepath}'")
+                    return f"Folder '{display}' has been permanently deleted, {salutation}."
+                else:
+                    os.remove(filepath)
+                    logger.info(f"File deleted (confirmed): '{filepath}'")
+                    return f"File '{display}' has been permanently deleted, {salutation}."
+            except PermissionError:
+                logger.error(f"Permission denied deleting '{filepath}'")
+                return f"I don't have permission to delete '{display}', {salutation}."
+            except Exception as e:
+                logger.error(f"Failed to delete '{filepath}': {e}")
+                return f"I was unable to delete '{display}', {salutation}."
 
         # System-level tray trigger
         if cmd_lower in ("settings", "open settings"):

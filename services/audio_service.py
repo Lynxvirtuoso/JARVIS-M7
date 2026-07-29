@@ -1103,7 +1103,6 @@ class AudioService(threading.Thread):
             if not decision.accepted:
                 logger.info(f"Self-hearing echo/noise discarded | Reason: {decision.reason} | Transcript: '{transcription[:30]}'")
                 return
-
             from services.tts.provider_manager import tts_manager
             tts_manager.stop_speaking()
 
@@ -1111,12 +1110,12 @@ class AudioService(threading.Thread):
             logger.info(f"INTERRUPT LATENCY: {latency:.4f} seconds | Reason: {decision.reason} | Req ID: {active_req_id}")
 
             if decision.reason == "correction":
-                # Extract the corrected command by removing "actually" and "I meant" prefixes
-                import re as _re
-                corrected = _re.sub(
-                    r"(-i)^(-:actually[,\s]*)-(-:i meant[,\s]*)-(-:no[,\s]-)-(-:tell me about[,\s]*)-",
+                # Extract the corrected command by removing "actually", "I meant", etc. prefixes
+                corrected = re.sub(
+                    r"^(?:actually[,\s]*)?(?:i meant[,\s]*)?(?:no[,\s]*)?(?:tell me about[,\s]*)?",
                     "",
-                    decision.normalized_text
+                    decision.normalized_text,
+                    flags=re.IGNORECASE
                 ).strip()
                 if not corrected:
                     corrected = decision.normalized_text
