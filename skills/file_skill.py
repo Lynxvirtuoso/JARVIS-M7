@@ -125,6 +125,10 @@ class FileSkill(BaseSkill):
         decision = TrustGate.evaluate(tool_call)
 
         if decision == "CONFIRM":
+            confirm_phrase = (
+                f"Are you sure you want to permanently delete "
+                f"{'folder' if is_dir else 'file'} '{filename_raw}', {salutation}?"
+            )
             # Set engine pending state so the verbal "yes" confirmation executes deletion
             if engine:
                 target_cmd = f"delete_file_confirmed:{resolved}"
@@ -132,19 +136,7 @@ class FileSkill(BaseSkill):
                 engine.pending_command_type = "file_deletion"
                 engine.misheard_command = original_command
                 engine.transition_to("WAITING_FOR_CONFIRMATION")
-
-                confirm_phrase = (
-                    f"Are you sure you want to permanently delete "
-                    f"{'folder' if is_dir else 'file'} '{filename_raw}', {salutation}?"
-                )
-                from services.speech_service import speech
-                speech.speak(confirm_phrase)
-                return ""
-            # Fallback if no engine context (e.g. typed command without engine)
-            return (
-                f"Are you sure you want to permanently delete "
-                f"{'folder' if is_dir else 'file'} '{filename_raw}', {salutation}?"
-            )
+            return confirm_phrase
 
         elif decision == "EXECUTE":
             return self._perform_deletion(resolved, filename_raw, is_dir, salutation)
