@@ -131,10 +131,21 @@ class FileSkill(BaseSkill):
             )
             # Set engine pending state so the verbal "yes" confirmation executes deletion
             if engine:
+                import time as _time
+                from services.conversation.models import PendingConfirmation, SensitiveActionType
                 target_cmd = f"delete_file_confirmed:{resolved}"
                 engine.pending_command = target_cmd
                 engine.pending_command_type = "file_deletion"
                 engine.misheard_command = original_command
+                engine.pending_confirmation_obj = PendingConfirmation(
+                    request_id=getattr(engine, "active_request_id", "unknown"),
+                    session_id=getattr(engine, "current_session_id", "default_session"),
+                    action_type=SensitiveActionType.DELETE_FILE,
+                    action_payload={"command": target_cmd},
+                    source=getattr(engine, "last_command_source", "voice"),
+                    created_at=_time.time(),
+                    expires_at=_time.time() + 30.0
+                )
                 engine.transition_to("WAITING_FOR_CONFIRMATION")
             return confirm_phrase
 

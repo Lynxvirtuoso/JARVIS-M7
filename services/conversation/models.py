@@ -14,6 +14,7 @@ class SensitiveActionType(Enum):
     LOG_OUT_WINDOWS = "log_out_windows"
     LOCK_COMPUTER = "lock_computer"
     DELETE_FILE = "delete_file"
+    FILE_CREATION_OVERWRITE = "file_creation_overwrite"
     SEND_MESSAGE = "send_message"
     SEND_EMAIL = "send_email"
     PLACE_CALL = "place_call"

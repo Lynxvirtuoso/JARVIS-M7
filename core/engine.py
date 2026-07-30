@@ -1139,6 +1139,7 @@ class JarvisEngine(QObject):
 
         self.last_command_source = source
         self.active_request_id = request_id
+        self.current_session_id = getattr(req, "session_id", "default_session")
         self.wake_timer.stop()
         salutation = config.salutation
 
@@ -1222,6 +1223,11 @@ class JarvisEngine(QObject):
                 self.execute_confirmed_sensitive_action(action_type, cmd_to_run, request_id=request_id)
                 return
             elif any(_is_match(ans, normalized_ans) for ans in no_indicators):
+                if conf_obj:
+                    current_session = getattr(req, "session_id", "default_session")
+                    if conf_obj.session_id != current_session or conf_obj.source != source:
+                        logger.warning(f"Cancellation ignored: source/session mismatch ({conf_obj.source}/{conf_obj.session_id} vs {source}/{current_session})")
+                        return
                 logger.info("Command rejected/cancelled by user.")
                 self.pending_confirmation_obj = None
                 self.pending_command = None
@@ -1232,6 +1238,11 @@ class JarvisEngine(QObject):
                 self._schedule_return_to_session_after_speech()
                 return
             else:
+                if conf_obj:
+                    current_session = getattr(req, "session_id", "default_session")
+                    if conf_obj.session_id != current_session or conf_obj.source != source:
+                        logger.warning(f"Unclear-reply cancellation ignored: source/session mismatch ({conf_obj.source}/{conf_obj.session_id} vs {source}/{current_session})")
+                        return
                 logger.info("Unclear confirmation reply.")
                 self.pending_confirmation_obj = None
                 self.pending_command = None
@@ -1750,9 +1761,19 @@ class JarvisEngine(QObject):
             # Check if file exists to handle overwrite confirmation
             if os.path.exists(filepath):
                 logger.info(f"File already exists: '{filepath}'. Demoting to overwrite confirmation.")
+                from services.conversation.models import PendingConfirmation, SensitiveActionType
                 self.pending_command = f"create_file_confirmed:{filepath}"
                 self.pending_command_type = "file_creation"
                 self.misheard_command = command
+                self.pending_confirmation_obj = PendingConfirmation(
+                    request_id=request_id,
+                    session_id=getattr(req, "session_id", "default_session"),
+                    action_type=SensitiveActionType.FILE_CREATION_OVERWRITE,
+                    action_payload={"command": f"create_file_confirmed:{filepath}"},
+                    source=source,
+                    created_at=time.time(),
+                    expires_at=time.time() + 30.0
+                )
                 self.transition_to("WAITING_FOR_CONFIRMATION")
                 speech.speak(f"The file {filename} already exists, Sir. Would you like to overwrite it-")
                 return
@@ -1775,9 +1796,19 @@ class JarvisEngine(QObject):
                     self._launch_worker(f"create_file_confirmed:{filepath}")
                     return
                 elif decision == "CONFIRM":
+                    from services.conversation.models import PendingConfirmation, SensitiveActionType
                     self.pending_command = f"create_file_confirmed:{filepath}"
                     self.pending_command_type = "file_creation"
                     self.misheard_command = command
+                    self.pending_confirmation_obj = PendingConfirmation(
+                        request_id=request_id,
+                        session_id=getattr(req, "session_id", "default_session"),
+                        action_type=SensitiveActionType.FILE_CREATION_OVERWRITE,
+                        action_payload={"command": f"create_file_confirmed:{filepath}"},
+                        source=source,
+                        created_at=time.time(),
+                        expires_at=time.time() + 30.0
+                    )
                     self.transition_to("WAITING_FOR_CONFIRMATION")
                     speech.speak(f"Would you like me to create the file {filename} on your {location}, Sir?")
                     return
